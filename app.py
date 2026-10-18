@@ -1122,7 +1122,10 @@ def main():
         st.divider()
         st.caption("Shift rotation is calculated automatically.")
 
+        # Clear the remembered shift so the default is recalculated
+        # using the latest events from Supabase.
         if st.button("Refresh calendar and records", use_container_width=True):
+            st.session_state.pop("selected_shift_key", None)
             st.rerun()
 
     if page == "Management":
