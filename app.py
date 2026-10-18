@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hmac
@@ -1053,51 +1054,57 @@ def main():
             selected["end"].date() != selected["start"].date()
         )
 
-        # Overnight shifts get a two-day time grid. Starting at midnight
-        # lets FullCalendar render both the evening and post-midnight events.
-        calendar_options = {
-            "initialView": (
-                "shiftOvernight" if overnight_shift else "shiftDay"
-            ),
-            "views": {
-                "shiftDay": {
-                    "type": "timeGrid",
-                    "duration": {"days": 1},
-                },
-                "shiftOvernight": {
-                    "type": "timeGrid",
-                    "duration": {"days": 2},
-                },
-            },
-            "initialDate": selected["start"].date().isoformat(),
-            "headerToolbar": {
-                "left": "",
-                "center": "title",
-                "right": "",
-            },
-            "slotMinTime": (
-                "00:00:00"
-                if overnight_shift
-                else selected["start"].strftime("%H:%M:%S")
-            ),
-            "slotMaxTime": (
-                "24:00:00"
-                if overnight_shift
-                else selected["end"].strftime("%H:%M:%S")
-            ),
-            "scrollTime": selected["start"].strftime("%H:%M:%S"),
-            "height": 560,
-            "allDaySlot": False,
-            "nowIndicator": True,
-            "timeZone": "local",
-            "firstDay": 1,
-        }
-
+        # Night shifts use one chronological column across midnight.
+        # Day shifts retain the normal hourly time grid.
         if overnight_shift:
+            calendar_options = {
+                "initialView": "listShift",
+                "views": {
+                    "listShift": {
+                        "type": "list",
+                        "duration": {"days": 2},
+                    },
+                },
+                "initialDate": selected["start"].date().isoformat(),
+                "headerToolbar": {
+                    "left": "",
+                    "center": "title",
+                    "right": "",
+                },
+                "height": 560,
+                "nowIndicator": True,
+                "timeZone": "local",
+                "firstDay": 1,
+            }
+
             st.caption(
-                "This shift crosses midnight. The calendar shows both "
-                "dates; only bookings overlapping this shift are included."
+                "Night shift bookings are shown in one chronological "
+                "column across midnight."
             )
+        else:
+            calendar_options = {
+                "initialView": "shiftDay",
+                "views": {
+                    "shiftDay": {
+                        "type": "timeGrid",
+                        "duration": {"days": 1},
+                    },
+                },
+                "initialDate": selected["start"].date().isoformat(),
+                "headerToolbar": {
+                    "left": "",
+                    "center": "title",
+                    "right": "",
+                },
+                "slotMinTime": selected["start"].strftime("%H:%M:%S"),
+                "slotMaxTime": selected["end"].strftime("%H:%M:%S"),
+                "scrollTime": selected["start"].strftime("%H:%M:%S"),
+                "height": 560,
+                "allDaySlot": False,
+                "nowIndicator": True,
+                "timeZone": "local",
+                "firstDay": 1,
+            }
 
         try:
             calendar(
