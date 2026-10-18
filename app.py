@@ -995,12 +995,14 @@ def main():
     left, right = st.columns([0.92, 1.45], gap="large")
 
     # ---------------------------------------------------------------
-    # Calendar and transport totals
+    # Transport list and totals
     # ---------------------------------------------------------------
 
     with left:
-        st.subheader("Transport calendar")
-        st.caption("Bookings overlapping the selected shift are shown.")
+        st.subheader("Transport bookings")
+        st.caption(
+            "Bookings overlapping the selected shift, ordered by start time."
+        )
 
         calendar_events = []
 
@@ -1050,61 +1052,37 @@ def main():
                 }
             )
 
+        # All shifts use one chronological list view.
+        # Night shifts cover both dates across midnight.
         overnight_shift = (
             selected["end"].date() != selected["start"].date()
         )
+        calendar_days = 2 if overnight_shift else 1
 
-        # Night shifts use one chronological column across midnight.
-        # Day shifts retain the normal hourly time grid.
-        if overnight_shift:
-            calendar_options = {
-                "initialView": "listShift",
-                "views": {
-                    "listShift": {
-                        "type": "list",
-                        "duration": {"days": 2},
-                    },
+        calendar_options = {
+            "initialView": "listShift",
+            "views": {
+                "listShift": {
+                    "type": "list",
+                    "duration": {"days": calendar_days},
                 },
-                "initialDate": selected["start"].date().isoformat(),
-                "headerToolbar": {
-                    "left": "",
-                    "center": "title",
-                    "right": "",
-                },
-                "height": 560,
-                "nowIndicator": True,
-                "timeZone": "local",
-                "firstDay": 1,
-            }
+            },
+            "initialDate": selected["start"].date().isoformat(),
+            "headerToolbar": {
+                "left": "",
+                "center": "title",
+                "right": "",
+            },
+            "height": 560,
+            "nowIndicator": True,
+            "timeZone": "local",
+            "firstDay": 1,
+        }
 
-            st.caption(
-                "Night shift bookings are shown in one chronological "
-                "column across midnight."
-            )
-        else:
-            calendar_options = {
-                "initialView": "shiftDay",
-                "views": {
-                    "shiftDay": {
-                        "type": "timeGrid",
-                        "duration": {"days": 1},
-                    },
-                },
-                "initialDate": selected["start"].date().isoformat(),
-                "headerToolbar": {
-                    "left": "",
-                    "center": "title",
-                    "right": "",
-                },
-                "slotMinTime": selected["start"].strftime("%H:%M:%S"),
-                "slotMaxTime": selected["end"].strftime("%H:%M:%S"),
-                "scrollTime": selected["start"].strftime("%H:%M:%S"),
-                "height": 560,
-                "allDaySlot": False,
-                "nowIndicator": True,
-                "timeZone": "local",
-                "firstDay": 1,
-            }
+        st.caption(
+            "All bookings are displayed in one chronological column. "
+            "Night shifts continue across midnight."
+        )
 
         try:
             calendar(
@@ -1114,7 +1092,7 @@ def main():
             )
         except Exception as exc:
             st.info(
-                "The calendar widget could not render. "
+                "The booking list could not render. "
                 f"Bookings are listed below. Details: {exc}"
             )
 
