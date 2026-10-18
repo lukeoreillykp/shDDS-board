@@ -1,4 +1,4 @@
-Python
+
 from __future__ import annotations
 
 import hashlib
@@ -21,7 +21,6 @@ ROTATION_ANCHOR_MONDAY = date(2026, 10, 12)
 BASE_COLOURS = {"Days": "Yellow", "Afters": "Red", "Nights": "Blue"}
 COLOUR_HEX = {"Yellow": "#E0B323", "Red": "#D64545", "Blue": "#2878C8"}
 SHIFT_ORDER = ["Days", "Afters", "Nights"]
-SHIFT_LABELS = {"Days": "Days", "Afters": "Afters", "Nights": "Nights"}
 
 DEFAULT_QUESTIONS = [
     {"question_key": "safety_trigger", "label": "Safety trigger", "section": "Safety & quality", "input_type": "choice", "rules": {"colour_rule": "severity_lmh"}, "options": ["L", "M", "H"], "sort_order": 10, "is_active": True, "is_system": True},
@@ -54,8 +53,7 @@ def get_supabase() -> Client:
         key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
         if not url or not key:
             raise RuntimeError(
-                "Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit secrets. "
-                "See README.md."
+                "Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit secrets."
             )
         st.session_state.supabase_client = create_client(url, key)
     return st.session_state.supabase_client
@@ -82,14 +80,14 @@ def week_monday(day: date) -> date:
 
 def team_colours_for_week(day: date) -> dict[str, str]:
     weeks = (week_monday(day) - ROTATION_ANCHOR_MONDAY).days // 7
-    shift_colours = dict(BASE_COLOURS)
+    colours = dict(BASE_COLOURS)
     for _ in range(weeks % 3):
-        shift_colours = {
-            "Days": shift_colours["Afters"],
-            "Afters": shift_colours["Nights"],
-            "Nights": shift_colours["Days"],
+        colours = {
+            "Days": colours["Afters"],
+            "Afters": colours["Nights"],
+            "Nights": colours["Days"],
         }
-    return shift_colours
+    return colours
 
 
 def make_shift(start_day: date, shift_name: str) -> dict:
@@ -122,21 +120,21 @@ def make_shift(start_day: date, shift_name: str) -> dict:
 
 def shifts_between(start_day: date, end_day: date) -> list[dict]:
     shifts = []
-    d = start_day
-    while d <= end_day:
-        if d.weekday() < 5:
-            shifts.extend(make_shift(d, name) for name in SHIFT_ORDER)
-        d += timedelta(days=1)
-    return sorted(shifts, key=lambda s: s["start"])
+    current_day = start_day
+    while current_day <= end_day:
+        if current_day.weekday() < 5:
+            shifts.extend(make_shift(current_day, name) for name in SHIFT_ORDER)
+        current_day += timedelta(days=1)
+    return sorted(shifts, key=lambda shift: shift["start"])
 
 
 def choose_default_shift(now: datetime) -> dict:
-    all_shifts = shifts_between(now.date() - timedelta(days=14), now.date() + timedelta(days=14))
-    active = [s for s in all_shifts if s["start"] <= now < s["end"]]
+    shifts = shifts_between(now.date() - timedelta(days=14), now.date() + timedelta(days=14))
+    active = [s for s in shifts if s["start"] <= now < s["end"]]
     if active:
         return active[0]
-    previous = [s for s in all_shifts if s["end"] <= now]
-    return previous[-1] if previous else all_shifts[0]
+    previous = [s for s in shifts if s["end"] <= now]
+    return previous[-1] if previous else shifts[0]
 
 
 def adjacent_shifts(selected: dict) -> tuple[list[dict], int]:
@@ -161,7 +159,6 @@ def load_questions(sb: Client) -> list[dict]:
 
 
 def load_navigation_links(sb: Client) -> list[dict]:
-    """Load management-configured sidebar links."""
     try:
         return (
             sb.table("navigation_links")
@@ -189,10 +186,10 @@ def load_events(sb: Client) -> list[dict]:
             or []
         )
     except Exception as exc:
-        st.warning(f"Could not load the transport calendar's events table: {exc}")
+        st.warning(f"Could not load the transport calendar events: {exc}")
         return []
 
-    out = []
+    result = []
     for event in rows:
         start_dt = parse_dt(event.get("start"))
         end_dt = parse_dt(event.get("end"))
@@ -200,8 +197,8 @@ def load_events(sb: Client) -> list[dict]:
             continue
         event["_start"] = start_dt
         event["_end"] = end_dt
-        out.append(event)
-    return out
+        result.append(event)
+    return result
 
 
 def overlaps(event: dict, shift: dict) -> bool:
@@ -213,14 +210,13 @@ def events_for_shift(events: list[dict], shift: dict) -> list[dict]:
 
 
 def source_matches(event: dict, source: str) -> bool:
-    val = str(event.get("source") or "").strip().casefold()
-    title = str(event.get("title") or "").strip().casefold()
+    value = str(event.get("source") or "").strip().casefold()
     if source == "Bulk":
-        return val == "bulk" or "bulk inbound" in val or "bulk" in title
+        return value == "bulk" or "bulk inbound" in value
     if source == "Campey":
-        return val == "campey" or "campey" in title
+        return value == "campey" or "campey" in value
     if source == "DHL":
-        return val == "dhl" or "dhl" in title
+        return value == "dhl" or "dhl" in value
     return False
 
 
@@ -234,13 +230,11 @@ def planned_counts(events: list[dict], shift: dict) -> dict[str, int]:
 
 
 def cil_is_planned(events: list[dict], shift: dict) -> bool:
-    for event in events_for_shift(events, shift):
-        if (
-            "cil" in str(event.get("title") or "").casefold()
-            or "cil" in str(event.get("source") or "").casefold()
-        ):
-            return True
-    return False
+    return any(
+        "cil" in str(e.get("title") or "").casefold()
+        or "cil" in str(e.get("source") or "").casefold()
+        for e in events_for_shift(events, shift)
+    )
 
 
 def load_submissions(sb: Client, selected_start: datetime | None = None) -> dict[str, dict]:
@@ -264,10 +258,7 @@ def submission_for(submissions: dict[str, dict], shift: dict) -> dict | None:
 
 
 def answer_colour(
-    question: dict,
-    value,
-    planned: dict,
-    answers: dict | None = None,
+    question: dict, value, planned: dict, answers: dict | None = None
 ) -> str | None:
     answers = answers or {}
     rule = (question.get("rules") or {}).get("colour_rule", "none")
@@ -286,22 +277,13 @@ def answer_colour(
             ips_count = float(value) if value not in (None, "") else 0
         except (TypeError, ValueError):
             ips_count = 0
-
         return "green" if ips_count > 0 else "red"
 
     if value is None or value == "":
-        if rule == "zero_green":
-            return "green"
+        if rule in ("zero_green", "ips_positive_or_no_breakdowns"):
+            return "green" if rule == "zero_green" else None
         if rule in ("positive_green", "staff_under_three_red"):
             return "red"
-        if rule in (
-            "matches_inbound_planned",
-            "matches_campey_planned",
-            "matches_dhl_planned",
-            "hundred_green",
-            "severity_lmh",
-        ):
-            return None
         return None
 
     try:
@@ -311,16 +293,12 @@ def answer_colour(
 
     if rule == "severity_lmh":
         return {"L": "green", "M": "amber", "H": "red"}.get(str(value).upper())
-
     if rule == "zero_green" and number is not None:
         return "green" if number == 0 else "red"
-
     if rule == "positive_green" and number is not None:
         return "green" if number >= 1 else "red"
-
     if rule == "hundred_green" and number is not None:
         return "green" if number >= 100 else "red"
-
     if rule == "staff_under_three_red" and number is not None:
         return "red" if number < 3 else "green"
 
@@ -331,7 +309,6 @@ def answer_colour(
     }
     if rule in match_map and number is not None:
         return "green" if number == planned.get(match_map[rule], 0) else "red"
-
     return None
 
 
@@ -349,10 +326,7 @@ def badge_text(value, colour: str | None) -> str:
 
 
 def snapshot_answers(
-    questions: list[dict],
-    values: dict,
-    planned: dict,
-    cil_planned: bool,
+    questions: list[dict], values: dict, planned: dict, cil_planned: bool
 ) -> dict:
     result = {}
     for question in questions:
@@ -363,7 +337,6 @@ def snapshot_answers(
             value = planned.get(key, 0)
         else:
             value = values.get(key, "")
-
         result[key] = {
             "label": question["label"],
             "value": value,
@@ -376,7 +349,11 @@ def snapshot_answers(
 
 def render_saved_answers(snapshot: dict, planned: dict | None = None):
     planned = dict(planned or {})
-    for key in ("inbound_planned", "outbound_planned_campeys", "outbound_planned_dhl"):
+    for key in (
+        "inbound_planned",
+        "outbound_planned_campeys",
+        "outbound_planned_dhl",
+    ):
         item = snapshot.get(key) or {}
         value = item.get("value")
         if value not in (None, "", "N/A"):
@@ -390,20 +367,23 @@ def render_saved_answers(snapshot: dict, planned: dict | None = None):
         return
 
     answer_values = {
-        key: (item or {}).get("value", "")
-        for key, item in snapshot.items()
+        key: (item or {}).get("value", "") for key, item in snapshot.items()
     }
-
-    for section in dict.fromkeys(
+    sections = dict.fromkeys(
         (item.get("section") or "General") for item in snapshot.values()
-    ):
+    )
+    for section in sections:
         st.markdown(f"**{section}**")
         for key, item in snapshot.items():
             if (item.get("section") or "General") != section:
                 continue
             value = item.get("value", "")
-            question = {"rules": item.get("rules") or {}}
-            colour = answer_colour(question, value, planned, answer_values)
+            colour = answer_colour(
+                {"rules": item.get("rules") or {}},
+                value,
+                planned,
+                answer_values,
+            )
             if value == "N/A":
                 colour = "grey"
             st.markdown(
@@ -419,9 +399,8 @@ def slugify(text: str) -> str:
 def require_management_password() -> bool:
     expected = str(st.secrets.get("MANAGEMENT_PASSWORD", ""))
     if not expected:
-        st.error("Set MANAGEMENT_PASSWORD in Streamlit secrets before using management.")
+        st.error("Set MANAGEMENT_PASSWORD in Streamlit secrets first.")
         return False
-
     if st.session_state.get("management_authenticated"):
         return True
 
@@ -435,7 +414,6 @@ def require_management_password() -> bool:
             st.session_state.management_authenticated = True
             st.rerun()
         st.error("Incorrect password.")
-
     return False
 
 
@@ -445,46 +423,33 @@ def management_page(sb: Client, questions: list[dict]):
 
     with links_tab:
         st.subheader("Sidebar links")
-        st.caption(
-            "Add useful team resources to the collapsible sidebar. "
-            "Use full http:// or https:// URLs."
-        )
-
+        st.caption("Add team resources to the collapsible sidebar.")
         try:
             links = load_navigation_links(sb)
-
             with st.expander("Add a sidebar link", expanded=True):
                 with st.form("add_navigation_link_form", clear_on_submit=True):
-                    link_label = st.text_input(
-                        "Link name",
-                        placeholder="e.g. Shift procedures",
-                    )
-                    link_url = st.text_input(
-                        "Website URL",
-                        placeholder="https://...",
-                    )
-                    link_order = st.number_input(
+                    label = st.text_input("Link name", placeholder="e.g. Shift procedures")
+                    url = st.text_input("Website URL", placeholder="https://...")
+                    order = st.number_input(
                         "Display order",
                         min_value=0,
                         max_value=10000,
-                        value=max(
-                            [int(item.get("sort_order", 0)) for item in links] + [0]
-                        ) + 10,
+                        value=max([int(x.get("sort_order", 0)) for x in links] + [0]) + 10,
                         step=10,
                     )
-                    add_link = st.form_submit_button("Add link")
+                    add = st.form_submit_button("Add link")
 
-                if add_link:
-                    if not link_label.strip():
+                if add:
+                    if not label.strip():
                         st.error("Enter a name for the link.")
-                    elif not valid_navigation_url(link_url.strip()):
-                        st.error("Enter a URL beginning with https:// or http://.")
+                    elif not valid_navigation_url(url.strip()):
+                        st.error("Enter a URL starting with https:// or http://.")
                     else:
                         sb.table("navigation_links").insert(
                             {
-                                "label": link_label.strip(),
-                                "url": link_url.strip(),
-                                "sort_order": int(link_order),
+                                "label": label.strip(),
+                                "url": url.strip(),
+                                "sort_order": int(order),
                                 "is_active": True,
                             }
                         ).execute()
@@ -492,24 +457,18 @@ def management_page(sb: Client, questions: list[dict]):
                         st.rerun()
 
             if not links:
-                st.info(
-                    "No sidebar links yet. Add one above. "
-                    "If the link table has not been created, run the SQL setup."
-                )
+                st.info("No sidebar links have been added yet.")
 
             for link in links:
                 with st.expander(
-                    f"{'🔗' if link.get('is_active', True) else '⚪'} "
-                    f"{link.get('label', 'Link')}"
+                    f"{'🔗' if link.get('is_active', True) else '⚪'} {link.get('label', 'Link')}"
                 ):
                     with st.form(f"edit_link_{link['id']}"):
                         edit_label = st.text_input(
-                            "Link name",
-                            value=link.get("label", ""),
+                            "Link name", value=link.get("label", "")
                         )
                         edit_url = st.text_input(
-                            "Website URL",
-                            value=link.get("url", ""),
+                            "Website URL", value=link.get("url", "")
                         )
                         edit_order = st.number_input(
                             "Display order",
@@ -518,37 +477,33 @@ def management_page(sb: Client, questions: list[dict]):
                             value=int(link.get("sort_order", 0)),
                             step=10,
                         )
-                        edit_active = st.checkbox(
+                        active = st.checkbox(
                             "Show in sidebar",
                             value=bool(link.get("is_active", True)),
                         )
                         save_link = st.form_submit_button("Save link")
 
                     col1, col2 = st.columns(2)
-
                     with col1:
                         if save_link:
                             if not edit_label.strip():
                                 st.error("Enter a name for the link.")
                             elif not valid_navigation_url(edit_url.strip()):
-                                st.error("Enter a URL beginning with https:// or http://.")
+                                st.error("Enter a URL starting with https:// or http://.")
                             else:
                                 sb.table("navigation_links").update(
                                     {
                                         "label": edit_label.strip(),
                                         "url": edit_url.strip(),
                                         "sort_order": int(edit_order),
-                                        "is_active": edit_active,
+                                        "is_active": active,
                                     }
                                 ).eq("id", link["id"]).execute()
                                 st.success("Link updated.")
                                 st.rerun()
 
                     with col2:
-                        if st.button(
-                            "Delete link",
-                            key=f"delete_link_{link['id']}",
-                        ):
+                        if st.button("Delete link", key=f"delete_link_{link['id']}"):
                             sb.table("navigation_links").delete().eq(
                                 "id", link["id"]
                             ).execute()
@@ -557,28 +512,19 @@ def management_page(sb: Client, questions: list[dict]):
 
         except Exception as exc:
             st.error(f"Could not manage sidebar links: {exc}")
-            st.info(
-                "Run the SQL setup in Supabase to create the navigation_links table."
-            )
+            st.info("Check that the navigation_links table exists in Supabase.")
 
     with questions_tab:
         st.subheader("Manage shift questions")
-
         if st.button("Lock management area"):
             st.session_state.management_authenticated = False
             st.rerun()
 
-        st.caption(
-            "Changes affect future/current displays. Existing saved answers retain "
-            "their question labels as a snapshot."
-        )
+        st.caption("Changes affect current and future displays. Saved answers keep their saved labels.")
 
         with st.expander("Add a question", expanded=True):
             with st.form("add_question_form", clear_on_submit=True):
-                label = st.text_input(
-                    "Question text",
-                    placeholder="e.g. Forklift checks completed",
-                )
+                label = st.text_input("Question text")
                 section = st.selectbox(
                     "Section",
                     [
@@ -590,8 +536,7 @@ def management_page(sb: Client, questions: list[dict]):
                     ],
                 )
                 input_type = st.selectbox(
-                    "Answer type",
-                    ["text", "number", "percentage", "choice", "yes_no"],
+                    "Answer type", ["text", "number", "percentage", "choice", "yes_no"]
                 )
                 colour_rule = st.selectbox(
                     "Colour rule",
@@ -606,8 +551,7 @@ def management_page(sb: Client, questions: list[dict]):
                     ],
                 )
                 options_text = st.text_input(
-                    "Choice options (comma-separated; only used for Choice)",
-                    placeholder="Yes, No, Not applicable",
+                    "Choice options (comma-separated)", placeholder="Yes, No"
                 )
                 required = st.checkbox("Required question")
                 submitted = st.form_submit_button("Add question")
@@ -623,27 +567,23 @@ def management_page(sb: Client, questions: list[dict]):
                     while key in existing:
                         key = f"{base}_{suffix}"
                         suffix += 1
-
                     options = (
                         [x.strip() for x in options_text.split(",") if x.strip()]
                         if input_type == "choice"
                         else ["Yes", "No"] if input_type == "yes_no" else []
                     )
-
                     row = {
                         "id": str(uuid.uuid4()),
                         "question_key": key,
                         "label": label.strip(),
                         "section": section,
                         "input_type": input_type,
-                        "rules": {
-                            "colour_rule": colour_rule,
-                            "required": required,
-                        },
+                        "rules": {"colour_rule": colour_rule, "required": required},
                         "options": options,
                         "sort_order": max(
                             [int(q.get("sort_order", 0)) for q in questions] + [0]
-                        ) + 10,
+                        )
+                        + 10,
                         "is_active": True,
                         "is_system": False,
                     }
@@ -652,69 +592,60 @@ def management_page(sb: Client, questions: list[dict]):
                     st.rerun()
 
         st.subheader("Existing questions")
+        sections = [
+            "Safety & quality",
+            "Operational checks",
+            "Transport",
+            "Handover notes",
+            "General",
+        ]
+        types = ["text", "number", "percentage", "choice", "yes_no", "auto"]
+        rules_list = [
+            "none",
+            "zero_green",
+            "positive_green",
+            "severity_lmh",
+            "hundred_green",
+            "staff_under_three_red",
+            "ips_positive_or_no_breakdowns",
+            "matches_inbound_planned",
+            "matches_campey_planned",
+            "matches_dhl_planned",
+        ]
 
         for question in questions:
             with st.expander(
-                f"{'🟢' if question.get('is_active', True) else '⚪'} "
-                f"{question['label']} · {question['section']}"
+                f"{'🟢' if question.get('is_active', True) else '⚪'} {question['label']} · {question.get('section', 'General')}"
             ):
                 with st.form(f"edit_{question['question_key']}"):
                     new_label = st.text_input(
-                        "Question text",
-                        value=question["label"],
+                        "Question text", value=question["label"]
                     )
-                    section_options = [
-                        "Safety & quality",
-                        "Operational checks",
-                        "Transport",
-                        "Handover notes",
-                        "General",
-                    ]
                     old_section = question.get("section", "General")
+                    section_index = sections.index(old_section) if old_section in sections else 4
                     new_section = st.selectbox(
-                        "Section",
-                        section_options,
-                        index=(
-                            section_options.index(old_section)
-                            if old_section in section_options
-                            else 4
-                        ),
+                        "Section", sections, index=section_index
                     )
-
-                    types = ["text", "number", "percentage", "choice", "yes_no", "auto"]
-                    current_type = question.get("input_type", "text")
+                    old_type = question.get("input_type", "text")
                     new_type = st.selectbox(
                         "Answer type",
                         types,
-                        index=types.index(current_type) if current_type in types else 0,
+                        index=types.index(old_type) if old_type in types else 0,
                         disabled=bool(question.get("is_system")),
                     )
-
-                    rules_list = [
-                        "none",
-                        "zero_green",
-                        "positive_green",
-                        "severity_lmh",
-                        "hundred_green",
-                        "staff_under_three_red",
-                        "ips_positive_or_no_breakdowns",
-                        "matches_inbound_planned",
-                        "matches_campey_planned",
-                        "matches_dhl_planned",
-                    ]
-                    old_rule = (question.get("rules") or {}).get("colour_rule", "none")
+                    old_rules = question.get("rules") or {}
+                    old_rule = old_rules.get("colour_rule", "none")
                     new_rule = st.selectbox(
                         "Colour rule",
                         rules_list,
                         index=rules_list.index(old_rule) if old_rule in rules_list else 0,
                     )
-
                     old_options = question.get("options") or []
                     new_options = st.text_input(
                         "Choice options (comma-separated)",
                         value=", ".join(old_options),
                     )
-                    new_order = st.number_input(
+                    order = st.number_input(
                         "Display order",
                         min_value=0,
                         max_value=10000,
@@ -722,8 +653,7 @@ def management_page(sb: Client, questions: list[dict]):
                         step=10,
                     )
                     active = st.checkbox(
-                        "Active",
-                        value=bool(question.get("is_active", True)),
+                        "Active", value=bool(question.get("is_active", True))
                     )
                     save = st.form_submit_button("Save question settings")
 
@@ -732,29 +662,25 @@ def management_page(sb: Client, questions: list[dict]):
                         st.error("Question text cannot be blank.")
                     else:
                         if new_type == "choice":
-                            opts = [x.strip() for x in new_options.split(",") if x.strip()]
+                            options = [x.strip() for x in new_options.split(",") if x.strip()]
                         elif new_type == "yes_no":
-                            opts = ["Yes", "No"]
-                        elif new_type == "auto":
-                            opts = old_options
+                            options = ["Yes", "No"]
                         else:
-                            opts = []
+                            options = old_options if new_type == "auto" else []
 
-                        rules = dict(question.get("rules") or {})
+                        rules = dict(old_rules)
                         rules["colour_rule"] = new_rule
-
                         sb.table("shift_questions").update(
                             {
                                 "label": new_label.strip(),
                                 "section": new_section,
                                 "input_type": new_type,
                                 "rules": rules,
-                                "options": opts,
-                                "sort_order": int(new_order),
+                                "options": options,
+                                "sort_order": int(order),
                                 "is_active": active,
                             }
                         ).eq("id", question["id"]).execute()
-
                         st.success("Question updated.")
                         st.rerun()
 
@@ -786,18 +712,18 @@ def render_question_input(
         return "N/A"
 
     if kind == "number":
-        lo = int(rules.get("min", 0))
-        hi = int(rules.get("max", 999999))
+        minimum = int(rules.get("min", 0))
+        maximum = int(rules.get("max", 999999))
         value = current_value if isinstance(current_value, (int, float)) else None
         return st.number_input(
             label,
-            min_value=lo,
-            max_value=hi,
+            min_value=minimum,
+            max_value=maximum,
             value=value,
             step=1,
             key=f"input_{key}",
             disabled=disabled,
-            placeholder="Leave blank if not recorded",
+            help="Leave at the default if nothing was recorded.",
         )
 
     if kind == "percentage":
@@ -818,16 +744,11 @@ def render_question_input(
         if rules.get("colour_rule") == "severity_lmh":
             st.caption("L = Low 🟢 · M = Medium 🟠 · H = High 🔴")
         choices = ["— Select —"] + options
-        existing = (
-            str(current_value)
-            if current_value not in (None, "")
-            else "— Select —"
-        )
-        idx = choices.index(existing) if existing in choices else 0
+        existing = str(current_value) if current_value not in (None, "") else "— Select —"
         selected = st.selectbox(
             label,
             choices,
-            index=idx,
+            index=choices.index(existing) if existing in choices else 0,
             key=f"input_{key}",
             disabled=disabled,
         )
@@ -835,16 +756,11 @@ def render_question_input(
 
     if kind == "yes_no":
         choices = ["— Select —", "Yes", "No"]
-        existing = (
-            str(current_value)
-            if current_value not in (None, "")
-            else "— Select —"
-        )
-        idx = choices.index(existing) if existing in choices else 0
+        existing = str(current_value) if current_value not in (None, "") else "— Select —"
         selected = st.selectbox(
             label,
             choices,
-            index=idx,
+            index=choices.index(existing) if existing in choices else 0,
             key=f"input_{key}",
             disabled=disabled,
         )
@@ -868,35 +784,31 @@ def main():
         questions = load_questions(sb)
     except Exception as exc:
         st.error(f"App setup problem: {exc}")
-        st.info(
-            "Follow the setup steps in README.md and run sql/setup.sql "
-            "in your Supabase SQL Editor."
-        )
+        st.info("Check your Streamlit secrets and database setup.")
         st.stop()
 
-    # Streamlit supplies the collapsible sidebar control at the top of the panel.
     with st.sidebar:
         st.header("Navigation")
-        st.caption("Use the arrow at the top of this panel to collapse or reopen it.")
+        st.caption("Use the arrow at the top of this panel to collapse or reopen the sidebar.")
         page = st.radio(
             "Open",
             ["Shift workspace", "Management"],
             label_visibility="collapsed",
         )
 
-        nav_links = load_navigation_links(sb)
-        if nav_links:
+        links = load_navigation_links(sb)
+        active_links = [link for link in links if link.get("is_active", True)]
+        if active_links:
             st.divider()
             st.subheader("Team links")
-            for nav_link in nav_links:
-                if nav_link.get("is_active", True):
-                    label = str(nav_link.get("label") or "Open link")
-                    url = str(nav_link.get("url") or "")
-                    if valid_navigation_url(url):
-                        st.markdown(f"- [{label}]({url})")
+            for link in active_links:
+                label = str(link.get("label") or "Open link")
+                url = str(link.get("url") or "")
+                if valid_navigation_url(url):
+                    st.markdown(f"- [{label}]({url})")
 
         st.divider()
-        st.caption("Shift rotation is calculated automatically. Team colours stay with the teams.")
+        st.caption("Shift rotation is calculated automatically.")
         if st.button("Refresh calendar and records", use_container_width=True):
             st.rerun()
 
@@ -927,24 +839,22 @@ def main():
         selected = choose_default_shift(now)
         st.session_state.selected_shift_key = selected["key"]
 
-    all_shifts, shift_idx = adjacent_shifts(selected)
-
-    if shift_idx > 0 and st.button("← Previous shift", key="prev_shift_top"):
-        st.session_state.selected_shift_key = all_shifts[shift_idx - 1]["key"]
-        st.rerun()
-
-    if shift_idx + 1 < len(all_shifts) and st.button(
-        "Next shift →",
-        key="next_shift_top",
-    ):
-        st.session_state.selected_shift_key = all_shifts[shift_idx + 1]["key"]
-        st.rerun()
+    all_shifts, shift_index = adjacent_shifts(selected)
+    previous_button, next_button = st.columns(2)
+    with previous_button:
+        if shift_index > 0 and st.button("← Previous shift"):
+            st.session_state.selected_shift_key = all_shifts[shift_index - 1]["key"]
+            st.rerun()
+    with next_button:
+        if shift_index + 1 < len(all_shifts) and st.button("Next shift →"):
+            st.session_state.selected_shift_key = all_shifts[shift_index + 1]["key"]
+            st.rerun()
 
     team_hex = COLOUR_HEX.get(selected["team_colour"], "#666666")
     st.markdown(
         f"<div style='padding:12px 16px;border-radius:10px;"
-        f"background:{team_hex}18;border-left:6px solid {team_hex};"
-        f"margin-bottom:14px'><b>{selected['label']}</b><br>"
+        f"background:{team_hex}18;border-left:6px solid {team_hex};margin-bottom:14px'>"
+        f"<b>{selected['label']}</b><br>"
         f"{selected['start'].strftime('%a %d %b %Y, %H:%M')} – "
         f"{selected['end'].strftime('%a %d %b %Y, %H:%M')} (UK time)</div>",
         unsafe_allow_html=True,
@@ -955,31 +865,28 @@ def main():
     cil_planned = cil_is_planned(events, selected)
     submissions = load_submissions(sb, selected["start"])
     saved = submission_for(submissions, selected)
-    saved_snapshot = (saved or {}).get("answers") or {}
-    previous = [
-        s for s in all_shifts[:shift_idx]
-        if s["end"] <= selected["start"]
+    saved_answers = (saved or {}).get("answers") or {}
+    previous_shifts = [
+        s for s in all_shifts[:shift_index] if s["end"] <= selected["start"]
     ][-3:]
 
     left, right = st.columns([0.92, 1.45], gap="large")
 
     with left:
         st.subheader("Transport calendar")
-        st.caption(
-            "Bookings overlapping this shift are shown. Previous/next shift controls "
-            "change both the calendar and the shift log."
-        )
+        st.caption("Bookings overlapping the selected shift are shown.")
 
-        cal_events = []
+        calendar_events = []
         for event in shift_events:
             source = str(event.get("source") or "Manual")
-            cal_events.append(
+            calendar_events.append(
                 {
                     "id": str(event.get("id", "")),
                     "title": f"{event.get('title') or 'Booking'} · {source}",
                     "start": event["_start"].isoformat(),
                     "end": event["_end"].isoformat(),
-                    "backgroundColor": event.get("colour") or COLOUR_HEX.get(
+                    "backgroundColor": event.get("colour")
+                    or COLOUR_HEX.get(
                         {"Campey": "Blue", "Bulk": "Yellow", "DHL": "Blue"}.get(
                             source, "Red"
                         ),
@@ -989,7 +896,7 @@ def main():
                 }
             )
 
-        cal_options = {
+        calendar_options = {
             "initialView": "timeGridDay",
             "initialDate": selected["start"].date().isoformat(),
             "headerToolbar": {"left": "", "center": "title", "right": ""},
@@ -1007,28 +914,18 @@ def main():
         }
 
         if selected["end"].date() != selected["start"].date():
-            st.caption(
-                "This shift crosses midnight; bookings are filtered by actual "
-                "overlap with the shift window."
-            )
-            cal_options["slotMaxTime"] = "24:00:00"
+            st.caption("This shift crosses midnight; bookings are filtered by overlap.")
 
         try:
             calendar(
-                events=cal_events,
-                options=cal_options,
+                events=calendar_events,
+                options=calendar_options,
                 key=f"calendar_{selected['key']}",
             )
         except Exception:
-            st.info(
-                "Calendar widget could not render. The shift's bookings "
-                "are listed below instead."
-            )
+            st.info("The calendar widget could not render. Bookings are listed below.")
 
-        with st.expander(
-            f"Bookings in this shift ({len(shift_events)})",
-            expanded=True,
-        ):
+        with st.expander(f"Bookings in this shift ({len(shift_events)})", expanded=True):
             if not shift_events:
                 st.caption("No calendar bookings overlap this shift.")
             for event in sorted(shift_events, key=lambda x: x["_start"]):
@@ -1046,10 +943,7 @@ def main():
 
     with right:
         st.subheader("Shift questions and answers")
-        st.caption(
-            "Answers save to the shared database. The colour beside each saved "
-            "answer follows the rule for that question."
-        )
+        st.caption("Answers save to the shared database.")
 
         with st.form(f"shift_form_{selected['key']}"):
             submitter = st.text_input(
@@ -1066,31 +960,29 @@ def main():
                 for question in active_questions:
                     if question.get("section", "General") != section:
                         continue
-
-                    old = saved_snapshot.get(question["question_key"], {})
+                    old = saved_answers.get(question["question_key"], {})
                     old_value = old.get("value", "")
                     if question.get("input_type") == "auto":
                         old_value = planned.get(question["question_key"], 0)
 
                     value = render_question_input(
-                        question,
-                        old_value,
-                        planned,
-                        cil_planned,
+                        question, old_value, planned, cil_planned
                     )
                     values[question["question_key"]] = value
 
-                    if question.get("input_type") != "auto" and not (
-                        question["question_key"] == "cil_completion" and not cil_planned
+                    if (
+                        question.get("input_type") != "auto"
+                        and not (
+                            question["question_key"] == "cil_completion"
+                            and not cil_planned
+                        )
                     ):
                         colour = answer_colour(question, value, planned, values)
                         if colour:
                             st.caption(f"Status: {badge_text(value, colour)}")
 
             submitted = st.form_submit_button(
-                "Save shift record",
-                type="primary",
-                use_container_width=True,
+                "Save shift record", type="primary", use_container_width=True
             )
 
         if submitted:
@@ -1100,15 +992,11 @@ def main():
                 if (q.get("rules") or {}).get("required")
                 and values.get(q["question_key"]) in (None, "")
             ]
-
             if missing:
                 st.error("Please complete required questions: " + ", ".join(missing))
             else:
                 snapshot = snapshot_answers(
-                    active_questions,
-                    values,
-                    planned,
-                    cil_planned,
+                    active_questions, values, planned, cil_planned
                 )
                 row = {
                     "shift_date": selected["shift_date"],
@@ -1120,7 +1008,6 @@ def main():
                     "submitted_by": submitter.strip() or None,
                     "updated_at": datetime.now(UK).isoformat(),
                 }
-
                 try:
                     if saved and saved.get("id"):
                         sb.table("shift_submissions").update(row).eq(
@@ -1128,7 +1015,6 @@ def main():
                         ).execute()
                     else:
                         sb.table("shift_submissions").insert(row).execute()
-
                     st.success("Shift record saved.")
                     st.rerun()
                 except Exception as exc:
@@ -1136,26 +1022,21 @@ def main():
 
         st.divider()
         st.subheader("Current shift record")
-
         if saved:
             st.caption(
                 f"Last saved: {saved.get('updated_at', 'unknown')} · "
                 f"Recorded by: {saved.get('submitted_by') or 'Not specified'}"
             )
-            render_saved_answers(saved_snapshot, planned)
+            render_saved_answers(saved_answers, planned)
         else:
-            st.info(
-                "This shift has not been saved yet. Complete the questions above "
-                "and save the record."
-            )
+            st.info("This shift has not been saved yet.")
 
         st.divider()
         st.subheader("Previous three shifts")
-
-        if not previous:
+        if not previous_shifts:
             st.caption("No earlier shifts found in the generated schedule.")
 
-        for past_shift in reversed(previous):
+        for past_shift in reversed(previous_shifts):
             past_submission = submission_for(submissions, past_shift)
             title = (
                 f"{past_shift['label']} · "
@@ -1165,16 +1046,16 @@ def main():
             with st.expander(title, expanded=True):
                 if past_submission:
                     st.caption(
-                        f"Recorded by: {past_submission.get('submitted_by') or 'Not specified'} "
-                        f"· Updated: {past_submission.get('updated_at', 'unknown')}"
+                        f"Recorded by: {past_submission.get('submitted_by') or 'Not specified'} · "
+                        f"Updated: {past_submission.get('updated_at', 'unknown')}"
                     )
                     render_saved_answers(past_submission.get("answers") or {})
                 else:
                     st.caption("No record saved for this shift yet.")
 
     st.caption(
-        "Shift colour rotation is anchored to the confirmed week of 12 October 2026. "
-        "Calendar booking counts include any booking that overlaps the selected shift."
+        "Team-colour rotation is anchored to the week beginning 12 October 2026. "
+        "Transport booking counts include any booking overlapping the selected shift."
     )
 
 
