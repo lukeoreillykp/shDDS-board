@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hmac
@@ -992,147 +991,15 @@ def main():
         if shift["end"] <= selected["start"]
     ][-3:]
 
-    left, right = st.columns([0.92, 1.45], gap="large")
+    # Questions and historical shift records occupy the wider left column.
+    # The chronological transport list is positioned on the right.
+    left, right = st.columns([1.2, 1.0], gap="large")
 
     # ---------------------------------------------------------------
-    # Transport list and totals
+    # Shift questions, saving, and historical records — LEFT
     # ---------------------------------------------------------------
 
     with left:
-        st.subheader("Transport bookings")
-        st.caption(
-            "Bookings overlapping the selected shift, ordered by start time."
-        )
-
-        calendar_events = []
-
-        for event in shift_events:
-            source = str(
-                event.get("source")
-                or event.get("load_header")
-                or event.get("category")
-                or ""
-            ).strip()
-
-            title_text = str(event.get("title") or "")
-            search_text = (
-                source
-                + " "
-                + title_text
-                + " "
-                + str(event.get("load_header") or "")
-            ).casefold()
-
-            if "campey" in search_text:
-                source = "Campey"
-            elif "dhl" in search_text:
-                source = "DHL"
-            elif "bulk" in search_text:
-                source = "Bulk"
-            elif not source:
-                source = "Manual"
-
-            colour = event.get("colour")
-
-            if not colour:
-                colour = {
-                    "Campey": COLOUR_HEX["Blue"],
-                    "Bulk": COLOUR_HEX["Yellow"],
-                    "DHL": COLOUR_HEX["Blue"],
-                }.get(source, "#777777")
-
-            calendar_events.append(
-                {
-                    "id": str(event.get("id", "")),
-                    "title": f"{title_text or 'Booking'} · {source}",
-                    "start": event["_start"].isoformat(),
-                    "end": event["_end"].isoformat(),
-                    "backgroundColor": colour,
-                    "borderColor": colour,
-                }
-            )
-
-        # All shifts use one chronological list view.
-        # Night shifts cover both dates across midnight.
-        overnight_shift = (
-            selected["end"].date() != selected["start"].date()
-        )
-        calendar_days = 2 if overnight_shift else 1
-
-        calendar_options = {
-            "initialView": "listShift",
-            "views": {
-                "listShift": {
-                    "type": "list",
-                    "duration": {"days": calendar_days},
-                },
-            },
-            "initialDate": selected["start"].date().isoformat(),
-            "headerToolbar": {
-                "left": "",
-                "center": "title",
-                "right": "",
-            },
-            "height": 560,
-            "nowIndicator": True,
-            "timeZone": "local",
-            "firstDay": 1,
-        }
-
-        st.caption(
-            "All bookings are displayed in one chronological column. "
-            "Night shifts continue across midnight."
-        )
-
-        try:
-            calendar(
-                events=calendar_events,
-                options=calendar_options,
-                key=f"calendar_{selected['key']}",
-            )
-        except Exception as exc:
-            st.info(
-                "The booking list could not render. "
-                f"Bookings are listed below. Details: {exc}"
-            )
-
-        with st.expander(
-            f"Bookings in this shift ({len(shift_events)})",
-            expanded=True,
-        ):
-            if not shift_events:
-                st.caption("No calendar bookings overlap this shift.")
-
-            for event in sorted(
-                shift_events,
-                key=lambda item: item["_start"],
-            ):
-                title_text = str(event.get("title") or "Booking")
-                source = str(event.get("source") or "")
-
-                if not source:
-                    source = str(
-                        event.get("load_header")
-                        or event.get("category")
-                        or "Transport"
-                    )
-
-                st.markdown(
-                    f"**{title_text}**  \n"
-                    f"{event['_start'].strftime('%a %H:%M')}–"
-                    f"{event['_end'].strftime('%a %H:%M')} · {source}"
-                )
-
-        st.markdown("**Planned transport totals**")
-        st.metric("Bulk inbound", planned["inbound_planned"])
-        st.metric("Campeys outbound", planned["outbound_planned_campeys"])
-        st.metric("DHL outbound", planned["outbound_planned_dhl"])
-
-    # ---------------------------------------------------------------
-    # Shift questions, saving, and historical records
-    # ---------------------------------------------------------------
-
-    with right:
         st.subheader("Shift questions and answers")
         st.caption("Answers save to the shared database.")
 
@@ -1287,6 +1154,159 @@ def main():
                     )
                 else:
                     st.caption("No record saved for this shift yet.")
+
+    # ---------------------------------------------------------------
+    # Transport list and totals — RIGHT
+    # ---------------------------------------------------------------
+
+    with right:
+        st.subheader("Transport bookings")
+        st.caption(
+            "Bookings overlapping the selected shift, ordered by start time."
+        )
+
+        calendar_events = []
+
+        for event in shift_events:
+            source = str(
+                event.get("source")
+                or event.get("load_header")
+                or event.get("category")
+                or ""
+            ).strip()
+
+            title_text = str(event.get("title") or "")
+            search_text = (
+                source
+                + " "
+                + title_text
+                + " "
+                + str(event.get("load_header") or "")
+            ).casefold()
+
+            if "campey" in search_text:
+                source = "Campey"
+            elif "dhl" in search_text:
+                source = "DHL"
+            elif "bulk" in search_text:
+                source = "Bulk"
+            elif not source:
+                source = "Manual"
+
+            colour = event.get("colour")
+
+            if not colour:
+                colour = {
+                    "Campey": COLOUR_HEX["Blue"],
+                    "Bulk": COLOUR_HEX["Yellow"],
+                    "DHL": COLOUR_HEX["Blue"],
+                }.get(source, "#777777")
+
+            # Keep Bulk's descriptive title. Simplify DHL and Campeys.
+            if source == "Campey":
+                display_title = "Campeys"
+            elif source == "DHL":
+                display_title = "DHL"
+            else:
+                display_title = f"{title_text or 'Booking'} · {source}"
+
+            calendar_events.append(
+                {
+                    "id": str(event.get("id", "")),
+                    "title": display_title,
+                    "start": event["_start"].isoformat(),
+                    "end": event["_end"].isoformat(),
+                    "backgroundColor": colour,
+                    "borderColor": colour,
+                }
+            )
+
+        # All shifts use one chronological list view.
+        # Night shifts cover both dates across midnight.
+        overnight_shift = (
+            selected["end"].date() != selected["start"].date()
+        )
+        calendar_days = 2 if overnight_shift else 1
+
+        calendar_options = {
+            "initialView": "listShift",
+            "views": {
+                "listShift": {
+                    "type": "list",
+                    "duration": {"days": calendar_days},
+                },
+            },
+            "initialDate": selected["start"].date().isoformat(),
+            "headerToolbar": {
+                "left": "",
+                "center": "title",
+                "right": "",
+            },
+            "height": 560,
+            "nowIndicator": True,
+            "timeZone": "local",
+            "firstDay": 1,
+        }
+
+        st.caption(
+            "All bookings are displayed in one chronological column. "
+            "Night shifts continue across midnight."
+        )
+
+        calendar_rendered = False
+
+        try:
+            calendar(
+                events=calendar_events,
+                options=calendar_options,
+                key=f"calendar_{selected['key']}",
+            )
+            calendar_rendered = True
+        except Exception as exc:
+            st.info(
+                "The chronological booking list could not render. "
+                f"Showing the text fallback instead. Details: {exc}"
+            )
+
+        # Only show the text-list fallback if the main list fails to render.
+        # This avoids showing a duplicate booking list during normal use.
+        if not calendar_rendered:
+            if not shift_events:
+                st.caption("No calendar bookings overlap this shift.")
+
+            for event in sorted(
+                shift_events,
+                key=lambda item: item["_start"],
+            ):
+                title_text = str(event.get("title") or "Booking")
+                source = str(
+                    event.get("source")
+                    or event.get("load_header")
+                    or event.get("category")
+                    or "Transport"
+                ).strip()
+
+                search_text = f"{source} {title_text}".casefold()
+
+                if "campey" in search_text:
+                    fallback_title = "Campeys"
+                elif "dhl" in search_text:
+                    fallback_title = "DHL"
+                elif "bulk" in search_text:
+                    fallback_title = f"{title_text} · Bulk"
+                else:
+                    fallback_title = f"{title_text} · {source}"
+
+                st.markdown(
+                    f"**{fallback_title}**  \n"
+                    f"{event['_start'].strftime('%a %H:%M')}–"
+                    f"{event['_end'].strftime('%a %H:%M')}"
+                )
+
+        st.markdown("**Planned transport totals**")
+        st.metric("Bulk inbound", planned["inbound_planned"])
+        st.metric("Campeys outbound", planned["outbound_planned_campeys"])
+        st.metric("DHL outbound", planned["outbound_planned_dhl"])
 
     st.caption(
         "Team-colour rotation is anchored to the week beginning "
