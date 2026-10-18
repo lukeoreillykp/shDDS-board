@@ -10,21 +10,31 @@ import streamlit as st
 from streamlit_calendar import calendar
 from supabase import Client, create_client
 
+from warehouse_core.shifts import (
+    UK,
+    COLOUR_HEX,
+    SHIFT_ORDER,
+    make_shift,
+    shifts_between,
+    team_colours_for_week,
+)
+from warehouse_core.rules import answer_colour
+from warehouse_core.transport import (
+    parse_dt,
+    normalize_events,
+    overlaps,
+    events_for_shift,
+    source_matches,
+    planned_counts,
+    fetch_all_pages,
+)
+
 st.set_page_config(
     page_title="Warehouse Shift Hub",
     page_icon="🏭",
     layout="wide",
 )
 
-UK = ZoneInfo("Europe/London")
-ROTATION_ANCHOR_MONDAY = date(2026, 10, 12)
-BASE_COLOURS = {"Days": "Yellow", "Afters": "Red", "Nights": "Blue"}
-COLOUR_HEX = {
-    "Yellow": "#E0B323",
-    "Red": "#D64545",
-    "Blue": "#2878C8",
-}
-SHIFT_ORDER = ["Days", "Afters", "Nights"]
 
 DEFAULT_QUESTIONS = [
     {"question_key": "safety_trigger", "label": "Safety trigger", "section": "Safety & quality", "input_type": "choice", "rules": {"colour_rule": "severity_lmh"}, "options": ["L", "M", "H"], "sort_order": 10, "is_active": True, "is_system": True},
@@ -65,88 +75,6 @@ def get_supabase() -> Client:
             )
         st.session_state.supabase_client = create_client(url, key)
     return st.session_state.supabase_client
-
-
-def parse_dt(value) -> datetime | None:
-    if not value:
-        return None
-
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UK)
-
-    return dt.astimezone(UK)
-
-
-def week_monday(day: date) -> date:
-    return day - timedelta(days=day.weekday())
-
-
-def team_colours_for_week(day: date) -> dict[str, str]:
-    weeks = (week_monday(day) - ROTATION_ANCHOR_MONDAY).days // 7
-    colours = dict(BASE_COLOURS)
-
-    for _ in range(weeks % 3):
-        colours = {
-            "Days": colours["Afters"],
-            "Afters": colours["Nights"],
-            "Nights": colours["Days"],
-        }
-
-    return colours
-
-
-def make_shift(start_day: date, shift_name: str) -> dict:
-    if shift_name == "Days":
-        start_t = time(6, 0)
-        end_t = time(13, 0) if start_day.weekday() == 4 else time(14, 0)
-        end_day = start_day
-
-    elif shift_name == "Afters":
-        start_t = time(13, 0) if start_day.weekday() == 4 else time(14, 0)
-        end_t = time(20, 0) if start_day.weekday() == 4 else time(22, 0)
-        end_day = start_day
-
-    else:
-        start_t = time(20, 0) if start_day.weekday() == 4 else time(22, 0)
-        end_t = time(3, 0) if start_day.weekday() == 4 else time(6, 0)
-        end_day = start_day + timedelta(days=1)
-
-    start_dt = datetime.combine(start_day, start_t, tzinfo=UK)
-    end_dt = datetime.combine(end_day, end_t, tzinfo=UK)
-    colour = team_colours_for_week(start_day)[shift_name]
-
-    return {
-        "shift_date": start_day.isoformat(),
-        "shift_name": shift_name,
-        "start": start_dt,
-        "end": end_dt,
-        "team_colour": colour,
-        "key": start_dt.isoformat(),
-        "label": (
-            f"{start_day.strftime('%a %d %b')} · "
-            f"{shift_name} · {colour} team"
-        ),
-    }
-
-
-def shifts_between(start_day: date, end_day: date) -> list[dict]:
-    shifts = []
-    current_day = start_day
-
-    while current_day <= end_day:
-        if current_day.weekday() < 5:
-            shifts.extend(make_shift(current_day, name) for name in SHIFT_ORDER)
-        current_day += timedelta(days=1)
-
-    return sorted(shifts, key=lambda shift: shift["start"])
 
 
 def choose_default_shift(
@@ -253,124 +181,24 @@ def valid_navigation_url(url: str) -> bool:
 # ---------------------------------------------------------------------
 
 def load_events(sb: Client) -> list[dict]:
-    """
-    Load all transport events from Supabase in pages.
-
-    Supabase may limit a single response to 1,000 rows. Fetching pages
-    ensures later records, including DHL bookings, are not omitted.
-
-    If an event has a start but no end, assign a one-hour fallback so
-    records with NULL end values remain visible, including Campeys bookings.
-    """
+    """Fetch all event pages and normalize transport events."""
     try:
-        rows = []
-        page_size = 1000
-        start = 0
-
-        while True:
-            page = (
+        rows = fetch_all_pages(
+            lambda start, end: (
                 sb.table("events")
                 .select("*")
-                .range(start, start + page_size - 1)
+                .range(start, end)
                 .execute()
                 .data
                 or []
-            )
-
-            rows.extend(page)
-
-            if len(page) < page_size:
-                break
-
-            start += page_size
-
+            ),
+            page_size=1000,
+        )
     except Exception as exc:
         st.warning(f"Could not load transport calendar events: {exc}")
         return []
 
-    result = []
-
-    for event in rows:
-        start_value = (
-            event.get("start")
-            or event.get("start_time")
-            or event.get("starts_at")
-        )
-        end_value = (
-            event.get("end")
-            or event.get("end_time")
-            or event.get("ends_at")
-        )
-
-        start_dt = parse_dt(start_value)
-        end_dt = parse_dt(end_value)
-
-        if not start_dt:
-            continue
-
-        if not end_dt:
-            end_dt = start_dt + timedelta(hours=1)
-
-        if end_dt <= start_dt:
-            continue
-
-        event["_start"] = start_dt
-        event["_end"] = end_dt
-        result.append(event)
-
-    return result
-
-
-def overlaps(event: dict, shift: dict) -> bool:
-    return (
-        event["_start"] < shift["end"]
-        and event["_end"] > shift["start"]
-    )
-
-
-def events_for_shift(events: list[dict], shift: dict) -> list[dict]:
-    return [event for event in events if overlaps(event, shift)]
-
-
-def source_matches(event: dict, source: str) -> bool:
-    fields = [
-        event.get("source"),
-        event.get("title"),
-        event.get("load_header"),
-        event.get("description"),
-        event.get("category"),
-        event.get("customer"),
-        event.get("carrier"),
-    ]
-
-    text = " ".join(
-        str(value) for value in fields if value is not None
-    ).casefold()
-
-    if source == "Bulk":
-        return "bulk" in text
-    if source == "Campey":
-        return "campey" in text
-    if source == "DHL":
-        return "dhl" in text
-
-    return False
-
-
-def planned_counts(events: list[dict], shift: dict) -> dict[str, int]:
-    relevant = events_for_shift(events, shift)
-
-    return {
-        "inbound_planned": sum(
-            source_matches(event, "Bulk") for event in relevant
-        ),
-        "outbound_planned_campeys": sum(
-            source_matches(event, "Campey") for event in relevant
-        ),
-        "outbound_planned_dhl": sum(
-            source_matches(event, "DHL") for event in relevant
-        ),
-    }
+    return normalize_events(rows)
 
 
 def cil_is_planned(events: list[dict], shift: dict) -> bool:
@@ -424,84 +252,6 @@ def submission_for(
 # ---------------------------------------------------------------------
 # Answer colours and display
 # ---------------------------------------------------------------------
-
-def answer_colour(
-    question: dict,
-    value,
-    planned: dict,
-    answers: dict | None = None,
-) -> str | None:
-    answers = answers or {}
-    rule = (question.get("rules") or {}).get("colour_rule", "none")
-
-    if rule == "ips_positive_or_no_breakdowns":
-        breakdowns = answers.get("breakdowns")
-
-        try:
-            breakdown_count = (
-                float(breakdowns)
-                if breakdowns not in (None, "")
-                else 0
-            )
-        except (TypeError, ValueError):
-            breakdown_count = 0
-
-        if breakdown_count <= 0:
-            return "green"
-
-        try:
-            ips_count = float(value) if value not in (None, "") else 0
-        except (TypeError, ValueError):
-            ips_count = 0
-
-        return "green" if ips_count > 0 else "red"
-
-    if value is None or value == "":
-        if rule == "zero_green":
-            return "green"
-        if rule in ("positive_green", "staff_under_three_red"):
-            return "red"
-        return None
-
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = None
-
-    if rule == "severity_lmh":
-        return {
-            "L": "green",
-            "M": "amber",
-            "H": "red",
-        }.get(str(value).upper())
-
-    if rule == "zero_green" and number is not None:
-        return "green" if number == 0 else "red"
-
-    if rule == "positive_green" and number is not None:
-        return "green" if number >= 1 else "red"
-
-    if rule == "hundred_green" and number is not None:
-        return "green" if number >= 100 else "red"
-
-    if rule == "staff_under_three_red" and number is not None:
-        return "red" if number < 3 else "green"
-
-    match_map = {
-        "matches_inbound_planned": "inbound_planned",
-        "matches_campey_planned": "outbound_planned_campeys",
-        "matches_dhl_planned": "outbound_planned_dhl",
-    }
-
-    if rule in match_map and number is not None:
-        return (
-            "green"
-            if number == planned.get(match_map[rule], 0)
-            else "red"
-        )
-
-    return None
-
 
 def badge_text(value, colour: str | None) -> str:
     shown = "Blank" if value is None or value == "" else str(value)
