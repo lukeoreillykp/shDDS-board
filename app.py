@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hmac
@@ -71,6 +70,7 @@ def get_supabase() -> Client:
 def parse_dt(value) -> datetime | None:
     if not value:
         return None
+
     if isinstance(value, datetime):
         dt = value
     else:
@@ -143,23 +143,40 @@ def shifts_between(start_day: date, end_day: date) -> list[dict]:
 
     while current_day <= end_day:
         if current_day.weekday() < 5:
-            shifts.extend(
-                make_shift(current_day, name) for name in SHIFT_ORDER
-            )
+            shifts.extend(make_shift(current_day, name) for name in SHIFT_ORDER)
         current_day += timedelta(days=1)
 
     return sorted(shifts, key=lambda shift: shift["start"])
 
 
-def choose_default_shift(now: datetime) -> dict:
+def choose_default_shift(
+    now: datetime,
+    events: list[dict] | None = None,
+) -> dict:
+    """
+    Choose the active shift where possible.
+
+    If no shift is active, choose the next future shift with transport
+    bookings. If no future shift has bookings, use the latest completed
+    shift. This makes future bookings visible when opening the app.
+    """
     shifts = shifts_between(
         now.date() - timedelta(days=14),
-        now.date() + timedelta(days=14),
+        now.date() + timedelta(days=35),
     )
-    active = [s for s in shifts if s["start"] <= now < s["end"]]
 
+    active = [s for s in shifts if s["start"] <= now < s["end"]]
     if active:
         return active[0]
+
+    if events:
+        future_with_events = [
+            shift
+            for shift in shifts
+            if shift["start"] > now and events_for_shift(events, shift)
+        ]
+        if future_with_events:
+            return future_with_events[0]
 
     previous = [s for s in shifts if s["end"] <= now]
     return previous[-1] if previous else shifts[0]
@@ -232,25 +249,17 @@ def valid_navigation_url(url: str) -> bool:
 
 
 # ---------------------------------------------------------------------
-# TRANSPORT CALENDAR FIX
+# Transport calendar
 # ---------------------------------------------------------------------
 
 def load_events(sb: Client) -> list[dict]:
     """
-    Load transport events.
-
-    Events with a start time but no end time are assigned a one-hour
-    fallback window. This is particularly important for Campeys records,
-    which may have a NULL end value in Supabase.
+    Load transport events. If an event has a start but no end,
+    assign a one-hour fallback so records with NULL end values remain
+    visible, including Campeys bookings.
     """
     try:
-        rows = (
-            sb.table("events")
-            .select("*")
-            .execute()
-            .data
-            or []
-        )
+        rows = sb.table("events").select("*").execute().data or []
     except Exception as exc:
         st.warning(f"Could not load transport calendar events: {exc}")
         return []
@@ -258,7 +267,6 @@ def load_events(sb: Client) -> list[dict]:
     result = []
 
     for event in rows:
-        # Support the usual start/end fields and common alternatives.
         start_value = (
             event.get("start")
             or event.get("start_time")
@@ -273,12 +281,9 @@ def load_events(sb: Client) -> list[dict]:
         start_dt = parse_dt(start_value)
         end_dt = parse_dt(end_value)
 
-        # Without a start time we cannot place the booking on the calendar.
         if not start_dt:
             continue
 
-        # FIX: Do not discard Campeys events just because end is NULL.
-        # Apply a one-hour fallback to any event that lacks an end time.
         if not end_dt:
             end_dt = start_dt + timedelta(hours=1)
 
@@ -304,10 +309,6 @@ def events_for_shift(events: list[dict], shift: dict) -> list[dict]:
 
 
 def source_matches(event: dict, source: str) -> bool:
-    """
-    Match a transport provider using source, title, load_header,
-    and other descriptive fields. Handles different source labels.
-    """
     fields = [
         event.get("source"),
         event.get("title"),
@@ -324,10 +325,8 @@ def source_matches(event: dict, source: str) -> bool:
 
     if source == "Bulk":
         return "bulk" in text
-
     if source == "Campey":
         return "campey" in text
-
     if source == "DHL":
         return "dhl" in text
 
@@ -423,18 +422,14 @@ def answer_colour(
         except (TypeError, ValueError):
             breakdown_count = 0
 
-        # No breakdowns: IPS is green even if left blank or zero.
         if breakdown_count <= 0:
             return "green"
 
         try:
-            ips_count = (
-                float(value) if value not in (None, "") else 0
-            )
+            ips_count = float(value) if value not in (None, "") else 0
         except (TypeError, ValueError):
             ips_count = 0
 
-        # If breakdowns occurred, at least one IPS must be completed.
         return "green" if ips_count > 0 else "red"
 
     if value is None or value == "":
@@ -591,11 +586,7 @@ def render_saved_answers(
 # ---------------------------------------------------------------------
 
 def slugify(text: str) -> str:
-    slug = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        text.casefold(),
-    ).strip("_")
+    slug = re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
     return slug[:48] or "question"
 
 
@@ -613,10 +604,7 @@ def require_management_password() -> bool:
         st.write(
             "Enter the management password to manage questions and sidebar links."
         )
-        password = st.text_input(
-            "Management password",
-            type="password",
-        )
+        password = st.text_input("Management password", type="password")
         submitted = st.form_submit_button("Unlock management area")
 
     if submitted:
@@ -631,9 +619,7 @@ def require_management_password() -> bool:
 
 def management_page(sb: Client, questions: list[dict]):
     st.title("Management")
-    questions_tab, links_tab = st.tabs(
-        ["Questions", "Sidebar links"]
-    )
+    questions_tab, links_tab = st.tabs(["Questions", "Sidebar links"])
 
     with links_tab:
         st.subheader("Sidebar links")
@@ -643,10 +629,7 @@ def management_page(sb: Client, questions: list[dict]):
             links = load_navigation_links(sb)
 
             with st.expander("Add a sidebar link", expanded=True):
-                with st.form(
-                    "add_navigation_link_form",
-                    clear_on_submit=True,
-                ):
+                with st.form("add_navigation_link_form", clear_on_submit=True):
                     label = st.text_input(
                         "Link name",
                         placeholder="e.g. Shift procedures",
@@ -660,10 +643,8 @@ def management_page(sb: Client, questions: list[dict]):
                         min_value=0,
                         max_value=10000,
                         value=max(
-                            [
-                                int(item.get("sort_order", 0))
-                                for item in links
-                            ] + [0]
+                            [int(item.get("sort_order", 0)) for item in links]
+                            + [0]
                         ) + 10,
                         step=10,
                     )
@@ -737,7 +718,6 @@ def management_page(sb: Client, questions: list[dict]):
                                         "is_active": active,
                                     }
                                 ).eq("id", link["id"]).execute()
-
                                 st.success("Link updated.")
                                 st.rerun()
 
@@ -771,10 +751,7 @@ def management_page(sb: Client, questions: list[dict]):
         )
 
         with st.expander("Add a question", expanded=True):
-            with st.form(
-                "add_question_form",
-                clear_on_submit=True,
-            ):
+            with st.form("add_question_form", clear_on_submit=True):
                 label = st.text_input("Question text")
                 section = st.selectbox(
                     "Section",
@@ -815,8 +792,7 @@ def management_page(sb: Client, questions: list[dict]):
                 else:
                     base = slugify(label)
                     existing = {
-                        question["question_key"]
-                        for question in questions
+                        question["question_key"] for question in questions
                     }
                     key = base
                     suffix = 2
@@ -870,14 +846,7 @@ def management_page(sb: Client, questions: list[dict]):
             "Handover notes",
             "General",
         ]
-        types = [
-            "text",
-            "number",
-            "percentage",
-            "choice",
-            "yes_no",
-            "auto",
-        ]
+        types = ["text", "number", "percentage", "choice", "yes_no", "auto"]
         rules_list = [
             "none",
             "zero_green",
@@ -918,9 +887,7 @@ def management_page(sb: Client, questions: list[dict]):
                     new_type = st.selectbox(
                         "Answer type",
                         types,
-                        index=types.index(old_type)
-                        if old_type in types
-                        else 0,
+                        index=types.index(old_type) if old_type in types else 0,
                         disabled=bool(question.get("is_system")),
                     )
 
@@ -1077,9 +1044,7 @@ def render_question_input(
         selected = st.selectbox(
             label,
             choices,
-            index=choices.index(existing)
-            if existing in choices
-            else 0,
+            index=choices.index(existing) if existing in choices else 0,
             key=f"input_{key}",
             disabled=disabled,
         )
@@ -1095,9 +1060,7 @@ def render_question_input(
         selected = st.selectbox(
             label,
             choices,
-            index=choices.index(existing)
-            if existing in choices
-            else 0,
+            index=choices.index(existing) if existing in choices else 0,
             key=f"input_{key}",
             disabled=disabled,
         )
@@ -1118,9 +1081,7 @@ def render_question_input(
 
 def main():
     st.title("🏭 Warehouse Shift Hub")
-    st.caption(
-        "Shift handover, performance checks and transport bookings"
-    )
+    st.caption("Shift handover, performance checks and transport bookings")
 
     try:
         sb = get_supabase()
@@ -1130,7 +1091,6 @@ def main():
         st.info("Check your Streamlit secrets and database setup.")
         st.stop()
 
-    # Collapsible native Streamlit sidebar
     with st.sidebar:
         st.header("Navigation")
         st.caption(
@@ -1145,8 +1105,7 @@ def main():
 
         links = load_navigation_links(sb)
         active_links = [
-            link for link in links
-            if link.get("is_active", True)
+            link for link in links if link.get("is_active", True)
         ]
 
         if active_links:
@@ -1163,10 +1122,7 @@ def main():
         st.divider()
         st.caption("Shift rotation is calculated automatically.")
 
-        if st.button(
-            "Refresh calendar and records",
-            use_container_width=True,
-        ):
+        if st.button("Refresh calendar and records", use_container_width=True):
             st.rerun()
 
     if page == "Management":
@@ -1176,7 +1132,8 @@ def main():
 
     active_questions = sorted(
         [
-            question for question in questions
+            question
+            for question in questions
             if question.get("is_active", True)
         ],
         key=lambda question: int(question.get("sort_order", 0)),
@@ -1185,10 +1142,12 @@ def main():
     events = load_events(sb)
     now = datetime.now(UK)
 
+    # Choose the default shift using both the current time and calendar data.
     if "selected_shift_key" not in st.session_state:
-        st.session_state.selected_shift_key = (
-            choose_default_shift(now)["key"]
-        )
+        st.session_state.selected_shift_key = choose_default_shift(
+            now,
+            events,
+        )["key"]
 
     candidates = shifts_between(
         now.date() - timedelta(days=35),
@@ -1197,14 +1156,15 @@ def main():
 
     selected = next(
         (
-            shift for shift in candidates
+            shift
+            for shift in candidates
             if shift["key"] == st.session_state.selected_shift_key
         ),
         None,
     )
 
     if selected is None:
-        selected = choose_default_shift(now)
+        selected = choose_default_shift(now, events)
         st.session_state.selected_shift_key = selected["key"]
 
     all_shifts, shift_index = adjacent_shifts(selected)
@@ -1228,10 +1188,7 @@ def main():
             )
             st.rerun()
 
-    team_hex = COLOUR_HEX.get(
-        selected["team_colour"],
-        "#666666",
-    )
+    team_hex = COLOUR_HEX.get(selected["team_colour"], "#666666")
 
     st.markdown(
         f"<div style='padding:12px 16px;border-radius:10px;"
@@ -1252,7 +1209,8 @@ def main():
     saved_answers = (saved or {}).get("answers") or {}
 
     previous_shifts = [
-        shift for shift in all_shifts[:shift_index]
+        shift
+        for shift in all_shifts[:shift_index]
         if shift["end"] <= selected["start"]
     ][-3:]
 
@@ -1264,9 +1222,7 @@ def main():
 
     with left:
         st.subheader("Transport calendar")
-        st.caption(
-            "Bookings overlapping the selected shift are shown."
-        )
+        st.caption("Bookings overlapping the selected shift are shown.")
 
         calendar_events = []
 
@@ -1278,10 +1234,12 @@ def main():
                 or ""
             ).strip()
 
-            # Infer provider from the title when source is blank or generic.
             title_text = str(event.get("title") or "")
             search_text = (
-                source + " " + title_text + " "
+                source
+                + " "
+                + title_text
+                + " "
                 + str(event.get("load_header") or "")
             ).casefold()
 
@@ -1314,20 +1272,43 @@ def main():
                 }
             )
 
+        overnight_shift = (
+            selected["end"].date() != selected["start"].date()
+        )
+
+        # Overnight shifts get a two-day time grid. Starting at midnight
+        # lets FullCalendar render both the evening and post-midnight events.
         calendar_options = {
-            "initialView": "timeGridDay",
+            "initialView": (
+                "shiftOvernight" if overnight_shift else "shiftDay"
+            ),
+            "views": {
+                "shiftDay": {
+                    "type": "timeGrid",
+                    "duration": {"days": 1},
+                },
+                "shiftOvernight": {
+                    "type": "timeGrid",
+                    "duration": {"days": 2},
+                },
+            },
             "initialDate": selected["start"].date().isoformat(),
             "headerToolbar": {
                 "left": "",
                 "center": "title",
                 "right": "",
             },
-            "slotMinTime": selected["start"].strftime("%H:%M:%S"),
-            "slotMaxTime": (
-                selected["end"].strftime("%H:%M:%S")
-                if selected["end"].date() == selected["start"].date()
-                else "24:00:00"
+            "slotMinTime": (
+                "00:00:00"
+                if overnight_shift
+                else selected["start"].strftime("%H:%M:%S")
             ),
+            "slotMaxTime": (
+                "24:00:00"
+                if overnight_shift
+                else selected["end"].strftime("%H:%M:%S")
+            ),
+            "scrollTime": selected["start"].strftime("%H:%M:%S"),
             "height": 560,
             "allDaySlot": False,
             "nowIndicator": True,
@@ -1335,9 +1316,10 @@ def main():
             "firstDay": 1,
         }
 
-        if selected["end"].date() != selected["start"].date():
+        if overnight_shift:
             st.caption(
-                "This shift crosses midnight; bookings are filtered by overlap."
+                "This shift crosses midnight. The calendar shows both "
+                "dates; only bookings overlapping this shift are included."
             )
 
         try:
@@ -1357,9 +1339,7 @@ def main():
             expanded=True,
         ):
             if not shift_events:
-                st.caption(
-                    "No calendar bookings overlap this shift."
-                )
+                st.caption("No calendar bookings overlap this shift.")
 
             for event in sorted(
                 shift_events,
@@ -1383,14 +1363,8 @@ def main():
 
         st.markdown("**Planned transport totals**")
         st.metric("Bulk inbound", planned["inbound_planned"])
-        st.metric(
-            "Campeys outbound",
-            planned["outbound_planned_campeys"],
-        )
-        st.metric(
-            "DHL outbound",
-            planned["outbound_planned_dhl"],
-        )
+        st.metric("Campeys outbound", planned["outbound_planned_campeys"])
+        st.metric("DHL outbound", planned["outbound_planned_dhl"])
 
     # ---------------------------------------------------------------
     # Shift questions, saving, and historical records
@@ -1504,9 +1478,7 @@ def main():
                             row
                         ).eq("id", saved["id"]).execute()
                     else:
-                        sb.table("shift_submissions").insert(
-                            row
-                        ).execute()
+                        sb.table("shift_submissions").insert(row).execute()
 
                     st.success("Shift record saved.")
                     st.rerun()
@@ -1530,15 +1502,10 @@ def main():
         st.subheader("Previous three shifts")
 
         if not previous_shifts:
-            st.caption(
-                "No earlier shifts found in the generated schedule."
-            )
+            st.caption("No earlier shifts found in the generated schedule.")
 
         for past_shift in reversed(previous_shifts):
-            past_submission = submission_for(
-                submissions,
-                past_shift,
-            )
+            past_submission = submission_for(submissions, past_shift)
 
             title = (
                 f"{past_shift['label']} · "
@@ -1557,9 +1524,7 @@ def main():
                         past_submission.get("answers") or {}
                     )
                 else:
-                    st.caption(
-                        "No record saved for this shift yet."
-                    )
+                    st.caption("No record saved for this shift yet.")
 
     st.caption(
         "Team-colour rotation is anchored to the week beginning "
