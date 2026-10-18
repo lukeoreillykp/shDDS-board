@@ -254,12 +254,36 @@ def valid_navigation_url(url: str) -> bool:
 
 def load_events(sb: Client) -> list[dict]:
     """
-    Load transport events. If an event has a start but no end,
-    assign a one-hour fallback so records with NULL end values remain
-    visible, including Campeys bookings.
+    Load all transport events from Supabase in pages.
+
+    Supabase may limit a single response to 1,000 rows. Fetching pages
+    ensures later records, including DHL bookings, are not omitted.
+
+    If an event has a start but no end, assign a one-hour fallback so
+    records with NULL end values remain visible, including Campeys bookings.
     """
     try:
-        rows = sb.table("events").select("*").execute().data or []
+        rows = []
+        page_size = 1000
+        start = 0
+
+        while True:
+            page = (
+                sb.table("events")
+                .select("*")
+                .range(start, start + page_size - 1)
+                .execute()
+                .data
+                or []
+            )
+
+            rows.extend(page)
+
+            if len(page) < page_size:
+                break
+
+            start += page_size
+
     except Exception as exc:
         st.warning(f"Could not load transport calendar events: {exc}")
         return []
