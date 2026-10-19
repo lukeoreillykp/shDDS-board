@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hmac
@@ -125,7 +124,7 @@ def adjacent_shifts(selected: dict) -> tuple[list[dict], int]:
 # ---------------------------------------------------------------------
 
 def load_if_down_tasks(sb: Client) -> list[dict]:
-    """Load tasks for all shifts."""
+    """Load all If Down tasks."""
     return (
         sb.table("if_down_tasks")
         .select("*")
@@ -181,6 +180,9 @@ def send_if_down_completion_email(
             f"No recipients found in {RECIPIENTS_FILE.name}."
         )
 
+    if completed_at.tzinfo is None:
+        completed_at = completed_at.replace(tzinfo=UK)
+
     formatted_time = completed_at.astimezone(UK).strftime(
         "%A %d %B %Y at %H:%M:%S UK time"
     )
@@ -191,7 +193,7 @@ def send_if_down_completion_email(
     message["To"] = ", ".join(recipients)
     message.set_content(
         "An If Down To Do List task has been completed.\n\n"
-        f"Shift: {shift_name}\n"
+        f"Shift/team: {shift_name}\n"
         f"Completed task: {task_text}\n"
         f"Completion time: {formatted_time}\n"
     )
@@ -201,30 +203,35 @@ def send_if_down_completion_email(
         smtp.send_message(message)
 
 
-def mark_if_down_task_complete(sb: Client, task: dict) -> tuple[bool, str]:
+def mark_if_down_task_complete(
+    sb: Client,
+    task: dict,
+    selected_shift: dict,
+) -> tuple[bool, str]:
     """
-    Save completion before attempting email.
+    Record a task completion globally.
 
-    A unique task_id in the completion table prevents a task being completed
-    twice. A failed email does not make the task reappear on the active list.
+    Completion is keyed by task_id. This makes the task disappear from
+    every team's active list, including when it is shared across colours.
     """
     task_id = str(task["id"])
     task_text = str(task["task"])
-    shift_name = str(task["shift_name"])
+    shift_name = str(selected_shift["shift_name"])
+    team_colour = str(selected_shift["team_colour"])
     completed_at = datetime.now(UK)
 
     try:
-        # Save the completion first so it remains gone even if email fails.
         sb.table("if_down_completions").insert({
             "task_id": task_id,
             "task_text": task_text,
             "shift_name": shift_name,
+            "team_colour": team_colour,
             "completed_at": completed_at.isoformat(),
             "email_sent": False,
             "email_error": None,
         }).execute()
+
     except Exception:
-        # It may already have been completed by another user/session.
         existing = (
             sb.table("if_down_completions")
             .select("task_id")
@@ -233,16 +240,21 @@ def mark_if_down_task_complete(sb: Client, task: dict) -> tuple[bool, str]:
             .data
             or []
         )
+
         if existing:
             return True, "This task has already been recorded as completed."
+
         raise
+
+    email_shift_label = f"{team_colour} team ({shift_name})"
 
     try:
         send_if_down_completion_email(
             task_text,
-            shift_name,
+            email_shift_label,
             completed_at,
         )
+
         sb.table("if_down_completions").update({
             "email_sent": True,
             "email_error": None,
@@ -252,25 +264,27 @@ def mark_if_down_task_complete(sb: Client, task: dict) -> tuple[bool, str]:
 
     except Exception as exc:
         error_text = str(exc)[:1000]
+
         sb.table("if_down_completions").update({
             "email_sent": False,
             "email_error": error_text,
         }).eq("task_id", task_id).execute()
 
         return True, (
-            "Task completed and removed from the list, but the email "
-            f"could not be sent: {error_text}"
+            "Task completed and removed from every team's list, "
+            f"but the email could not be sent: {error_text}"
         )
 
 
 def render_if_down_list(sb: Client, selected_shift: dict):
-    """Show only the list assigned to the selected shift."""
-    shift_name = str(selected_shift["shift_name"])
+    """Show tasks for the selected rotating team colour."""
+    selected_colour = str(selected_shift["team_colour"])
 
     st.divider()
     st.subheader("If Down To Do List")
     st.caption(
-        f"Tasks for **{shift_name}** only. Tick a task when it is complete."
+        f"Tasks for the **{selected_colour} team**. "
+        "Completing a task removes it from all team lists."
     )
 
     try:
@@ -280,7 +294,7 @@ def render_if_down_list(sb: Client, selected_shift: dict):
         st.error(f"Could not load the If Down To Do List: {exc}")
         st.info(
             "Check that the if_down_tasks and if_down_completions tables "
-            "have been created in Supabase."
+            "exist in Supabase."
         )
         return
 
@@ -292,9 +306,13 @@ def render_if_down_list(sb: Client, selected_shift: dict):
     active_tasks = [
         task for task in tasks
         if task.get("is_active", True)
-        and str(task.get("shift_name", "")) == shift_name
         and str(task.get("id")) not in completed_ids
+        and (
+            bool(task.get("all_colours", False))
+            or str(task.get("team_colour") or "") == selected_colour
+        )
     ]
+
     active_tasks.sort(
         key=lambda item: (
             int(item.get("sort_order", 0)),
@@ -303,20 +321,33 @@ def render_if_down_list(sb: Client, selected_shift: dict):
     )
 
     if not active_tasks:
-        st.success("No outstanding tasks for this shift.")
+        st.success(
+            f"No outstanding tasks for the {selected_colour} team."
+        )
         return
 
     for task in active_tasks:
         task_id = str(task["id"])
         task_text = str(task.get("task", ""))
 
+        task_label = (
+            f"{task_text} 🌐"
+            if task.get("all_colours", False)
+            else task_text
+        )
+
         if st.checkbox(
-            task_text,
+            task_label,
             key=f"if_down_complete_{task_id}",
             value=False,
         ):
             try:
-                saved, message = mark_if_down_task_complete(sb, task)
+                saved, message = mark_if_down_task_complete(
+                    sb,
+                    task,
+                    selected_shift,
+                )
+
                 if saved:
                     if "could not be sent" in message:
                         st.warning(message)
@@ -325,22 +356,27 @@ def render_if_down_list(sb: Client, selected_shift: dict):
                     else:
                         st.success(message)
                     st.rerun()
+
             except Exception as exc:
                 st.error(f"Could not save task completion: {exc}")
 
 
 def render_if_down_management(sb: Client):
-    """Management controls for the three shift-specific task lists."""
+    """Manage team-colour tasks and shared tasks."""
     st.subheader("Manage If Down To Do Lists")
     st.caption(
-        "Add tasks to the relevant shift. Completed tasks remain recorded "
-        "in Supabase and do not return to the active list."
+        "Assign tasks to Blue, Yellow, Red, or all three teams. "
+        "A completed task stays completed across every team list."
     )
 
-    shift_names = [str(name) for name in SHIFT_ORDER]
-    if not shift_names:
-        st.error("No shift names were found in SHIFT_ORDER.")
-        return
+    team_colours = ["Blue", "Yellow", "Red"]
+    management_tabs = [
+        "All tasks",
+        "Blue",
+        "Yellow",
+        "Red",
+        "Unassigned",
+    ]
 
     try:
         tasks = load_if_down_tasks(sb)
@@ -348,8 +384,8 @@ def render_if_down_management(sb: Client):
     except Exception as exc:
         st.error(f"Could not load If Down tasks: {exc}")
         st.info(
-            "Create the if_down_tasks and if_down_completions tables in "
-            "Supabase using the setup SQL provided with this app."
+            "Check that the if_down_tasks and if_down_completions "
+            "tables exist in Supabase."
         )
         return
 
@@ -360,18 +396,27 @@ def render_if_down_management(sb: Client):
 
     with st.expander("Add a task", expanded=True):
         with st.form("add_if_down_task_form", clear_on_submit=True):
-            new_task_shift = st.selectbox(
-                "Which shift is this task for?",
-                shift_names,
-                key="new_if_down_shift",
-            )
             new_task_text = st.text_input(
                 "Task description",
                 placeholder="Describe the task to complete",
             )
+
+            new_task_colour = st.selectbox(
+                "Assign to team",
+                team_colours,
+                key="new_if_down_colour",
+            )
+
+            new_task_all_colours = st.checkbox(
+                "Show this task on all three team lists",
+                value=False,
+                key="new_if_down_all_colours",
+            )
+
             next_order = max(
                 [int(task.get("sort_order", 0)) for task in tasks] + [0]
             ) + 10
+
             new_task_order = st.number_input(
                 "Display order",
                 min_value=0,
@@ -379,6 +424,7 @@ def render_if_down_management(sb: Client):
                 value=next_order,
                 step=10,
             )
+
             add_task = st.form_submit_button("Add task")
 
         if add_task:
@@ -387,40 +433,69 @@ def render_if_down_management(sb: Client):
             else:
                 try:
                     sb.table("if_down_tasks").insert({
-                        "shift_name": new_task_shift,
                         "task": new_task_text.strip(),
+                        "team_colour": (
+                            None if new_task_all_colours
+                            else new_task_colour
+                        ),
+                        "all_colours": bool(new_task_all_colours),
                         "sort_order": int(new_task_order),
                         "is_active": True,
                     }).execute()
-                    st.success(f"Task added to {new_task_shift}.")
+
+                    if new_task_all_colours:
+                        st.success("Task added to all three team lists.")
+                    else:
+                        st.success(
+                            f"Task added to the {new_task_colour} team list."
+                        )
                     st.rerun()
+
                 except Exception as exc:
                     st.error(f"Could not add task: {exc}")
 
     st.markdown("### Existing tasks")
+    tabs = st.tabs(management_tabs)
 
-    shift_tabs = st.tabs(shift_names)
+    def belongs_in_tab(task: dict, tab_name: str) -> bool:
+        colour = str(task.get("team_colour") or "")
+        all_colours = bool(task.get("all_colours", False))
 
-    for shift_tab, shift_name in zip(shift_tabs, shift_names):
-        with shift_tab:
-            shift_tasks = [
+        if tab_name == "All tasks":
+            return True
+        if tab_name == "Unassigned":
+            return not all_colours and colour not in team_colours
+        if tab_name in team_colours:
+            return all_colours or colour == tab_name
+        return False
+
+    for tab, tab_name in zip(tabs, management_tabs):
+        with tab:
+            tab_tasks = [
                 task for task in tasks
-                if str(task.get("shift_name", "")) == shift_name
+                if belongs_in_tab(task, tab_name)
             ]
-            shift_tasks.sort(
+
+            tab_tasks.sort(
                 key=lambda item: (
                     int(item.get("sort_order", 0)),
                     str(item.get("created_at", "")),
                 )
             )
 
-            if not shift_tasks:
-                st.caption("No tasks have been added to this shift.")
+            if not tab_tasks:
+                st.caption(
+                    "No unassigned tasks."
+                    if tab_name == "Unassigned"
+                    else "No tasks in this category."
+                )
                 continue
 
-            for task in shift_tasks:
+            for task in tab_tasks:
                 task_id = str(task["id"])
                 task_text = str(task.get("task", ""))
+                task_colour = str(task.get("team_colour") or "")
+                all_colours = bool(task.get("all_colours", False))
                 is_completed = task_id in completed_ids
                 is_active = bool(task.get("is_active", True))
 
@@ -431,12 +506,21 @@ def render_if_down_management(sb: Client):
                 else:
                     status = "Inactive"
 
-                with st.expander(f"{status} · {task_text}"):
+                if all_colours:
+                    assignment_label = "All teams"
+                elif task_colour in team_colours:
+                    assignment_label = f"{task_colour} team"
+                else:
+                    assignment_label = "Unassigned"
+
+                with st.expander(
+                    f"{status} · {assignment_label} · {task_text}"
+                ):
                     if is_completed:
                         st.info(
-                            "This task has already been completed. It remains "
-                            "in the completion history and cannot be reset "
-                            "from this screen."
+                            "This task has already been completed. "
+                            "It is removed from all team lists and cannot "
+                            "be reset from this screen."
                         )
 
                     with st.form(f"edit_if_down_{task_id}"):
@@ -444,6 +528,25 @@ def render_if_down_management(sb: Client):
                             "Task description",
                             value=task_text,
                         )
+
+                        colour_index = (
+                            team_colours.index(task_colour)
+                            if task_colour in team_colours
+                            else 0
+                        )
+
+                        edited_colour = st.selectbox(
+                            "Assigned team",
+                            team_colours,
+                            index=colour_index,
+                            disabled=all_colours,
+                        )
+
+                        edited_all_colours = st.checkbox(
+                            "Show on all three team lists",
+                            value=all_colours,
+                        )
+
                         edited_order = st.number_input(
                             "Display order",
                             min_value=0,
@@ -451,35 +554,45 @@ def render_if_down_management(sb: Client):
                             value=int(task.get("sort_order", 0)),
                             step=10,
                         )
+
                         edited_active = st.checkbox(
                             "Show on the active list",
                             value=is_active,
                             disabled=is_completed,
                         )
+
                         save_task = st.form_submit_button("Save task")
 
                     if save_task:
                         if not edited_text.strip():
                             st.error("Task description cannot be blank.")
-                        elif is_completed and edited_text.strip() != task_text:
+                        elif (
+                            is_completed
+                            and edited_text.strip() != task_text
+                        ):
                             st.error(
                                 "Completed task text is kept as a historical "
-                                "record. Add a new task if the task needs to "
-                                "be changed."
+                                "record. Add a new task if it needs changing."
                             )
                         else:
                             try:
                                 sb.table("if_down_tasks").update({
                                     "task": edited_text.strip(),
+                                    "team_colour": (
+                                        None if edited_all_colours
+                                        else edited_colour
+                                    ),
+                                    "all_colours": bool(edited_all_colours),
                                     "sort_order": int(edited_order),
                                     "is_active": (
-                                        is_active
-                                        if is_completed
+                                        is_active if is_completed
                                         else edited_active
                                     ),
                                 }).eq("id", task_id).execute()
+
                                 st.success("Task updated.")
                                 st.rerun()
+
                             except Exception as exc:
                                 st.error(f"Could not update task: {exc}")
 
@@ -506,11 +619,13 @@ def render_if_down_management(sb: Client):
     ]
 
     if not failed_emails:
-        st.success("All recorded task completion emails are marked as sent.")
+        st.success(
+            "All recorded task completion emails are marked as sent."
+        )
     else:
         st.caption(
-            "These tasks are already completed. Retry sends the notification "
-            "again without restoring the task to the active list."
+            "These tasks are already completed. Retrying sends the email "
+            "again without restoring the task to an active list."
         )
 
         for completion in sorted(
@@ -519,9 +634,9 @@ def render_if_down_management(sb: Client):
             reverse=True,
         ):
             completion_id = str(completion.get("id"))
-            task_id = str(completion.get("task_id"))
             task_text = str(completion.get("task_text", "Task"))
             shift_name = str(completion.get("shift_name", "Shift"))
+            team_colour = str(completion.get("team_colour") or "")
             completed_raw = completion.get("completed_at", "")
 
             try:
@@ -532,15 +647,23 @@ def render_if_down_management(sb: Client):
                     "%d %b %Y %H:%M:%S"
                 )
             except Exception:
+                completed_at = datetime.now(UK)
                 completed_display = str(completed_raw)
 
+            completion_label = (
+                f"{team_colour} team ({shift_name})"
+                if team_colour else shift_name
+            )
+
             st.markdown(
-                f"**{shift_name}: {task_text}**  \n"
+                f"**{completion_label}: {task_text}**  \n"
                 f"Completed: {completed_display} UK time"
             )
 
             if completion.get("email_error"):
-                st.caption(f"Last email error: {completion['email_error']}")
+                st.caption(
+                    f"Last email error: {completion['email_error']}"
+                )
 
             if st.button(
                 "Retry email notification",
@@ -549,18 +672,18 @@ def render_if_down_management(sb: Client):
                 try:
                     send_if_down_completion_email(
                         task_text,
-                        shift_name,
-                        (
-                            parse_dt(completed_raw)
-                            or datetime.now(UK)
-                        ),
+                        completion_label,
+                        completed_at,
                     )
+
                     sb.table("if_down_completions").update({
                         "email_sent": True,
                         "email_error": None,
                     }).eq("id", completion_id).execute()
+
                     st.success("Notification email sent.")
                     st.rerun()
+
                 except Exception as exc:
                     sb.table("if_down_completions").update({
                         "email_sent": False,
@@ -1867,7 +1990,7 @@ def main():
                     f"{event['_end'].strftime('%a %H:%M')}"
                 )
 
-        # Only show tasks assigned to the selected shift.
+        # Show tasks assigned to the selected rotating team colour.
         render_if_down_list(sb, selected)
 
         st.markdown("**Planned transport totals**")
