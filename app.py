@@ -895,7 +895,7 @@ def render_question_input(
             label,
             value=str(value),
             disabled=True,
-            key=f"auto_{key}",
+            key=f"auto_{key}_(value)",
             label_visibility=label_visibility,
         )
         return value
