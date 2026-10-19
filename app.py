@@ -81,13 +81,7 @@ def choose_default_shift(
     now: datetime,
     events: list[dict] | None = None,
 ) -> dict:
-    """
-    Choose the active shift where possible.
-
-    If no shift is active, choose the next future shift with transport
-    bookings. If no future shift has bookings, use the latest completed
-    shift. This makes future bookings visible when opening the app.
-    """
+    """Choose the active shift, or the most relevant future/past shift."""
     shifts = shifts_between(
         now.date() - timedelta(days=14),
         now.date() + timedelta(days=35),
@@ -353,6 +347,153 @@ def render_saved_answers(
                 f"- **{item.get('label', key)}:** "
                 f"{badge_text(value, colour)}"
             )
+
+
+def format_shift_heading(shift: dict) -> str:
+    """Format a shift heading using its actual start date and shift type."""
+    return (
+        f"{shift['start'].strftime('%a %d %b %Y')} · "
+        f"{shift.get('shift_name', 'Shift')}"
+    )
+
+
+def render_historical_answer(
+    question: dict,
+    snapshot: dict,
+):
+    """Render a historical answer as read-only text."""
+    key = question["question_key"]
+    item = snapshot.get(key) or {}
+
+    if not item:
+        st.caption("—")
+        return
+
+    value = item.get("value", "")
+    if value is None or value == "":
+        value = "Blank"
+
+    answer_values = {
+        answer_key: (answer_item or {}).get("value", "")
+        for answer_key, answer_item in snapshot.items()
+    }
+
+    planned = {}
+    for planned_key in (
+        "inbound_planned",
+        "outbound_planned_campeys",
+        "outbound_planned_dhl",
+    ):
+        planned_item = snapshot.get(planned_key) or {}
+        planned_value = planned_item.get("value")
+        if planned_value not in (None, "", "N/A"):
+            try:
+                planned[planned_key] = int(planned_value)
+            except (TypeError, ValueError):
+                pass
+
+    colour = answer_colour(
+        {"rules": item.get("rules") or question.get("rules") or {}},
+        item.get("value", ""),
+        planned,
+        answer_values,
+    )
+
+    if item.get("value") == "N/A":
+        colour = "grey"
+
+    st.markdown(badge_text(value, colour))
+
+
+def render_question_table(
+    questions: list[dict],
+    saved_answers: dict,
+    previous_shifts: list[dict],
+    submissions: dict[str, dict],
+    planned: dict,
+    cil_planned: bool,
+) -> dict:
+    """
+    Render questions with three read-only historical columns and one
+    current-shift answer column.
+    """
+    previous_shifts = sorted(
+        previous_shifts,
+        key=lambda shift: shift["start"],
+    )
+
+    # Keep the table at five columns even when fewer historical shifts exist.
+    while len(previous_shifts) < 3:
+        previous_shifts.insert(0, None)
+
+    headings = ["Question"]
+    for index, shift in enumerate(previous_shifts):
+        if shift is None:
+            headings.append(f"Previous shift {3 - index}")
+        else:
+            headings.append(format_shift_heading(shift))
+    headings.append(format_shift_heading({
+        "start": st.session_state.get("_current_shift_start"),
+        "shift_name": st.session_state.get("_current_shift_name", "Current shift"),
+    }) if st.session_state.get("_current_shift_start") else "Current shift")
+
+    widths = [2.0, 1.0, 1.0, 1.0, 1.35]
+    header_columns = st.columns(widths, gap="small")
+
+    for column, heading in zip(header_columns, headings):
+        with column:
+            st.markdown(f"**{heading}**")
+
+    st.divider()
+
+    values = {}
+    sections = list(dict.fromkeys(
+        question.get("section", "General")
+        for question in questions
+    ))
+
+    for section in sections:
+        st.markdown(f"### {section}")
+
+        for question in questions:
+            if question.get("section", "General") != section:
+                continue
+
+            key = question["question_key"]
+            columns = st.columns(widths, gap="small")
+
+            with columns[0]:
+                st.markdown(f"**{question['label']}**")
+
+            for index, past_shift in enumerate(previous_shifts):
+                with columns[index + 1]:
+                    if past_shift is None:
+                        st.caption("—")
+                        continue
+
+                    past_submission = submission_for(submissions, past_shift)
+                    past_answers = (
+                        (past_submission or {}).get("answers") or {}
+                    )
+                    render_historical_answer(question, past_answers)
+
+            with columns[4]:
+                old = saved_answers.get(key) or {}
+                old_value = old.get("value", "")
+
+                if question.get("input_type") == "auto":
+                    old_value = planned.get(key, 0)
+
+                value = render_question_input(
+                    question,
+                    old_value,
+                    planned,
+                    cil_planned,
+                    compact=True,
+                )
+                values[key] = value
+
+    return values
 
 
 # ---------------------------------------------------------------------
@@ -740,11 +881,13 @@ def render_question_input(
     planned: dict,
     cil_planned: bool,
     disabled: bool = False,
+    compact: bool = False,
 ):
     key = question["question_key"]
     label = question["label"]
     kind = question.get("input_type", "text")
     rules = question.get("rules") or {}
+    label_visibility = "collapsed" if compact else "visible"
 
     if kind == "auto":
         value = planned.get(key, 0)
@@ -753,6 +896,7 @@ def render_question_input(
             value=str(value),
             disabled=True,
             key=f"auto_{key}",
+            label_visibility=label_visibility,
         )
         return value
 
@@ -762,6 +906,7 @@ def render_question_input(
             value="N/A — no CIL planned",
             disabled=True,
             key=f"cil_na_{key}",
+            label_visibility=label_visibility,
         )
         return "N/A"
 
@@ -773,7 +918,6 @@ def render_question_input(
             if isinstance(current_value, (int, float))
             else None
         )
-
         return st.number_input(
             label,
             min_value=minimum,
@@ -783,6 +927,7 @@ def render_question_input(
             key=f"input_{key}",
             disabled=disabled,
             help="Leave at the default if nothing was recorded.",
+            label_visibility=label_visibility,
         )
 
     if kind == "percentage":
@@ -791,7 +936,6 @@ def render_question_input(
             if isinstance(current_value, (int, float))
             else None
         )
-
         return st.number_input(
             label,
             min_value=0,
@@ -801,14 +945,11 @@ def render_question_input(
             key=f"input_{key}",
             disabled=disabled,
             help="Enter 0–100%. 100% is green; below 100% is red.",
+            label_visibility=label_visibility,
         )
 
     if kind == "choice":
         options = question.get("options") or ["L", "M", "H"]
-
-        if rules.get("colour_rule") == "severity_lmh":
-            st.caption("L = Low 🟢 · M = Medium 🟠 · H = High 🔴")
-
         choices = ["— Select —"] + options
         existing = (
             str(current_value)
@@ -821,6 +962,7 @@ def render_question_input(
             index=choices.index(existing) if existing in choices else 0,
             key=f"input_{key}",
             disabled=disabled,
+            label_visibility=label_visibility,
         )
         return "" if selected == "— Select —" else selected
 
@@ -837,6 +979,7 @@ def render_question_input(
             index=choices.index(existing) if existing in choices else 0,
             key=f"input_{key}",
             disabled=disabled,
+            label_visibility=label_visibility,
         )
         return "" if selected == "— Select —" else selected
 
@@ -846,6 +989,7 @@ def render_question_input(
         key=f"input_{key}",
         disabled=disabled,
         height=80,
+        label_visibility=label_visibility,
     )
 
 
@@ -885,19 +1029,15 @@ def main():
         if active_links:
             st.divider()
             st.subheader("Team links")
-
             for link in active_links:
                 label = str(link.get("label") or "Open link")
                 url = str(link.get("url") or "")
-
                 if valid_navigation_url(url):
                     st.markdown(f"- [{label}]({url})")
 
         st.divider()
         st.caption("Shift rotation is calculated automatically.")
 
-        # Clear the remembered shift so the default is recalculated
-        # using the latest events from Supabase.
         if st.button("Refresh calendar and records", use_container_width=True):
             st.session_state.pop("selected_shift_key", None)
             st.rerun()
@@ -919,11 +1059,9 @@ def main():
     events = load_events(sb)
     now = datetime.now(UK)
 
-    # Choose the default shift using both the current time and calendar data.
     if "selected_shift_key" not in st.session_state:
         st.session_state.selected_shift_key = choose_default_shift(
-            now,
-            events,
+            now, events
         )["key"]
 
     candidates = shifts_between(
@@ -956,10 +1094,7 @@ def main():
             st.rerun()
 
     with next_button:
-        if (
-            shift_index + 1 < len(all_shifts)
-            and st.button("Next shift →")
-        ):
+        if shift_index + 1 < len(all_shifts) and st.button("Next shift →"):
             st.session_state.selected_shift_key = (
                 all_shifts[shift_index + 1]["key"]
             )
@@ -991,17 +1126,15 @@ def main():
         if shift["end"] <= selected["start"]
     ][-3:]
 
-    # Questions and historical shift records occupy the wider left column.
-    # The chronological transport list is positioned on the right.
+    # The question table occupies the wider left column.
     left, right = st.columns([1.2, 1.0], gap="large")
-
-    # ---------------------------------------------------------------
-    # Shift questions, saving, and historical records — LEFT
-    # ---------------------------------------------------------------
 
     with left:
         st.subheader("Shift questions and answers")
-        st.caption("Answers save to the shared database.")
+        st.caption(
+            "Compare the previous three shifts with the current shift. "
+            "Previous answers are read-only."
+        )
 
         with st.form(f"shift_form_{selected['key']}"):
             submitter = st.text_input(
@@ -1009,13 +1142,42 @@ def main():
                 value=(saved or {}).get("submitted_by") or "",
             )
 
-            values = {}
-            sections = list(
-                dict.fromkeys(
-                    question.get("section", "General")
-                    for question in active_questions
-                )
+            # The current shift heading uses the selected shift's actual date
+            # and shift name, rather than a hard-coded "Current shift" label.
+            st.session_state["_current_shift_start"] = selected["start"]
+            st.session_state["_current_shift_name"] = selected["shift_name"]
+
+            # Render the headings directly here so they are guaranteed to
+            # match the selected shift, even before the first form submission.
+            historical = sorted(
+                previous_shifts,
+                key=lambda shift: shift["start"],
             )
+            while len(historical) < 3:
+                historical.insert(0, None)
+
+            headings = ["Question"]
+            for index, past_shift in enumerate(historical):
+                headings.append(
+                    format_shift_heading(past_shift)
+                    if past_shift
+                    else f"Previous shift {3 - index}"
+                )
+            headings.append(format_shift_heading(selected))
+
+            widths = [2.0, 1.0, 1.0, 1.0, 1.35]
+            header_columns = st.columns(widths, gap="small")
+            for column, heading in zip(header_columns, headings):
+                with column:
+                    st.markdown(f"**{heading}**")
+
+            st.divider()
+
+            values = {}
+            sections = list(dict.fromkeys(
+                question.get("section", "General")
+                for question in active_questions
+            ))
 
             for section in sections:
                 st.markdown(f"### {section}")
@@ -1024,44 +1186,43 @@ def main():
                     if question.get("section", "General") != section:
                         continue
 
-                    old = saved_answers.get(
-                        question["question_key"],
-                        {},
-                    )
-                    old_value = old.get("value", "")
+                    key = question["question_key"]
+                    columns = st.columns(widths, gap="small")
 
-                    if question.get("input_type") == "auto":
-                        old_value = planned.get(
-                            question["question_key"],
-                            0,
-                        )
+                    with columns[0]:
+                        st.markdown(f"**{question['label']}**")
 
-                    value = render_question_input(
-                        question,
-                        old_value,
-                        planned,
-                        cil_planned,
-                    )
-                    values[question["question_key"]] = value
+                    for index, past_shift in enumerate(historical):
+                        with columns[index + 1]:
+                            if past_shift is None:
+                                st.caption("—")
+                                continue
 
-                    if (
-                        question.get("input_type") != "auto"
-                        and not (
-                            question["question_key"] == "cil_completion"
-                            and not cil_planned
-                        )
-                    ):
-                        colour = answer_colour(
-                            question,
-                            value,
-                            planned,
-                            values,
-                        )
-
-                        if colour:
-                            st.caption(
-                                f"Status: {badge_text(value, colour)}"
+                            past_submission = submission_for(
+                                submissions, past_shift
                             )
+                            past_answers = (
+                                (past_submission or {}).get("answers") or {}
+                            )
+                            render_historical_answer(
+                                question, past_answers
+                            )
+
+                    with columns[4]:
+                        old = saved_answers.get(key) or {}
+                        old_value = old.get("value", "")
+
+                        if question.get("input_type") == "auto":
+                            old_value = planned.get(key, 0)
+
+                        value = render_question_input(
+                            question,
+                            old_value,
+                            planned,
+                            cil_planned,
+                            compact=True,
+                        )
+                        values[key] = value
 
             submitted = st.form_submit_button(
                 "Save shift record",
@@ -1115,49 +1276,9 @@ def main():
                 except Exception as exc:
                     st.error(f"Could not save shift record: {exc}")
 
-        st.divider()
-        st.subheader("Current shift record")
-
-        if saved:
-            st.caption(
-                f"Last saved: {saved.get('updated_at', 'unknown')} · "
-                f"Recorded by: {saved.get('submitted_by') or 'Not specified'}"
-            )
-            render_saved_answers(saved_answers, planned)
-        else:
-            st.info("This shift has not been saved yet.")
-
-        st.divider()
-        st.subheader("Previous three shifts")
-
-        if not previous_shifts:
-            st.caption("No earlier shifts found in the generated schedule.")
-
-        for past_shift in reversed(previous_shifts):
-            past_submission = submission_for(submissions, past_shift)
-
-            title = (
-                f"{past_shift['label']} · "
-                f"{past_shift['start'].strftime('%H:%M')}–"
-                f"{past_shift['end'].strftime('%H:%M')}"
-            )
-
-            with st.expander(title, expanded=True):
-                if past_submission:
-                    st.caption(
-                        f"Recorded by: "
-                        f"{past_submission.get('submitted_by') or 'Not specified'} · "
-                        f"Updated: {past_submission.get('updated_at', 'unknown')}"
-                    )
-                    render_saved_answers(
-                        past_submission.get("answers") or {}
-                    )
-                else:
-                    st.caption("No record saved for this shift yet.")
-
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------------
     # Transport list and totals — RIGHT
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------------
 
     with right:
         st.subheader("Transport bookings")
@@ -1202,7 +1323,6 @@ def main():
                     "DHL": COLOUR_HEX["Blue"],
                 }.get(source, "#777777")
 
-            # Keep Bulk's descriptive title. Simplify DHL and Campeys.
             if source == "Campey":
                 display_title = "Campeys"
             elif source == "DHL":
@@ -1221,8 +1341,6 @@ def main():
                 }
             )
 
-        # All shifts use one chronological list view.
-        # Night shifts cover both dates across midnight.
         overnight_shift = (
             selected["end"].date() != selected["start"].date()
         )
@@ -1268,8 +1386,6 @@ def main():
                 f"Showing the text fallback instead. Details: {exc}"
             )
 
-        # Only show the text-list fallback if the main list fails to render.
-        # This avoids showing a duplicate booking list during normal use.
         if not calendar_rendered:
             if not shift_events:
                 st.caption("No calendar bookings overlap this shift.")
