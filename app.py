@@ -1,9 +1,14 @@
+
 from __future__ import annotations
 
 import hmac
+import os
 import re
+import smtplib
 import uuid
 from datetime import date, datetime, time, timedelta
+from email.message import EmailMessage
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -35,6 +40,8 @@ st.set_page_config(
     layout="wide",
 )
 
+EMAIL_SENDER = "KP.ponte.csv@gmail.com"
+RECIPIENTS_FILE = Path(__file__).resolve().parent / "email_recipients.txt"
 
 DEFAULT_QUESTIONS = [
     {"question_key": "safety_trigger", "label": "Safety trigger", "section": "Safety & quality", "input_type": "choice", "rules": {"colour_rule": "severity_lmh"}, "options": ["L", "M", "H"], "sort_order": 10, "is_active": True, "is_system": True},
@@ -81,20 +88,17 @@ def choose_default_shift(
     now: datetime,
     events: list[dict] | None = None,
 ) -> dict:
-    """Choose the active shift, or the most relevant future/past shift."""
     shifts = shifts_between(
         now.date() - timedelta(days=14),
         now.date() + timedelta(days=35),
     )
-
     active = [s for s in shifts if s["start"] <= now < s["end"]]
     if active:
         return active[0]
 
     if events:
         future_with_events = [
-            shift
-            for shift in shifts
+            shift for shift in shifts
             if shift["start"] > now and events_for_shift(events, shift)
         ]
         if future_with_events:
@@ -114,6 +118,455 @@ def adjacent_shifts(selected: dict) -> tuple[list[dict], int]:
         0,
     )
     return shifts, idx
+
+
+# ---------------------------------------------------------------------
+# If Down To Do Lists
+# ---------------------------------------------------------------------
+
+def load_if_down_tasks(sb: Client) -> list[dict]:
+    """Load tasks for all shifts."""
+    return (
+        sb.table("if_down_tasks")
+        .select("*")
+        .order("sort_order")
+        .execute()
+        .data
+        or []
+    )
+
+
+def load_if_down_completions(sb: Client) -> list[dict]:
+    """Load permanent completion records."""
+    return (
+        sb.table("if_down_completions")
+        .select("*")
+        .execute()
+        .data
+        or []
+    )
+
+
+def load_email_recipients() -> list[str]:
+    """Read unique email addresses from email_recipients.txt."""
+    if not RECIPIENTS_FILE.exists():
+        return []
+
+    recipients = []
+    for line in RECIPIENTS_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "@" not in line:
+            continue
+        if line not in recipients:
+            recipients.append(line)
+
+    return recipients
+
+
+def send_if_down_completion_email(
+    task_text: str,
+    shift_name: str,
+    completed_at: datetime,
+) -> None:
+    """Email the configured recipients about a completed task."""
+    password = str(st.secrets.get("GMAIL_APP_PASSWORD", "")).strip()
+    recipients = load_email_recipients()
+
+    if not password:
+        raise RuntimeError(
+            "GMAIL_APP_PASSWORD is missing from Streamlit secrets."
+        )
+    if not recipients:
+        raise RuntimeError(
+            f"No recipients found in {RECIPIENTS_FILE.name}."
+        )
+
+    formatted_time = completed_at.astimezone(UK).strftime(
+        "%A %d %B %Y at %H:%M:%S UK time"
+    )
+
+    message = EmailMessage()
+    message["Subject"] = f"If Down task completed — {shift_name}"
+    message["From"] = EMAIL_SENDER
+    message["To"] = ", ".join(recipients)
+    message.set_content(
+        "An If Down To Do List task has been completed.\n\n"
+        f"Shift: {shift_name}\n"
+        f"Completed task: {task_text}\n"
+        f"Completion time: {formatted_time}\n"
+    )
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
+        smtp.login(EMAIL_SENDER, password)
+        smtp.send_message(message)
+
+
+def mark_if_down_task_complete(sb: Client, task: dict) -> tuple[bool, str]:
+    """
+    Save completion before attempting email.
+
+    A unique task_id in the completion table prevents a task being completed
+    twice. A failed email does not make the task reappear on the active list.
+    """
+    task_id = str(task["id"])
+    task_text = str(task["task"])
+    shift_name = str(task["shift_name"])
+    completed_at = datetime.now(UK)
+
+    try:
+        # Save the completion first so it remains gone even if email fails.
+        sb.table("if_down_completions").insert({
+            "task_id": task_id,
+            "task_text": task_text,
+            "shift_name": shift_name,
+            "completed_at": completed_at.isoformat(),
+            "email_sent": False,
+            "email_error": None,
+        }).execute()
+    except Exception:
+        # It may already have been completed by another user/session.
+        existing = (
+            sb.table("if_down_completions")
+            .select("task_id")
+            .eq("task_id", task_id)
+            .execute()
+            .data
+            or []
+        )
+        if existing:
+            return True, "This task has already been recorded as completed."
+        raise
+
+    try:
+        send_if_down_completion_email(
+            task_text,
+            shift_name,
+            completed_at,
+        )
+        sb.table("if_down_completions").update({
+            "email_sent": True,
+            "email_error": None,
+        }).eq("task_id", task_id).execute()
+
+        return True, "Task completed and email notification sent."
+
+    except Exception as exc:
+        error_text = str(exc)[:1000]
+        sb.table("if_down_completions").update({
+            "email_sent": False,
+            "email_error": error_text,
+        }).eq("task_id", task_id).execute()
+
+        return True, (
+            "Task completed and removed from the list, but the email "
+            f"could not be sent: {error_text}"
+        )
+
+
+def render_if_down_list(sb: Client, selected_shift: dict):
+    """Show only the list assigned to the selected shift."""
+    shift_name = str(selected_shift["shift_name"])
+
+    st.divider()
+    st.subheader("If Down To Do List")
+    st.caption(
+        f"Tasks for **{shift_name}** only. Tick a task when it is complete."
+    )
+
+    try:
+        tasks = load_if_down_tasks(sb)
+        completions = load_if_down_completions(sb)
+    except Exception as exc:
+        st.error(f"Could not load the If Down To Do List: {exc}")
+        st.info(
+            "Check that the if_down_tasks and if_down_completions tables "
+            "have been created in Supabase."
+        )
+        return
+
+    completed_ids = {
+        str(item.get("task_id"))
+        for item in completions
+    }
+
+    active_tasks = [
+        task for task in tasks
+        if task.get("is_active", True)
+        and str(task.get("shift_name", "")) == shift_name
+        and str(task.get("id")) not in completed_ids
+    ]
+    active_tasks.sort(
+        key=lambda item: (
+            int(item.get("sort_order", 0)),
+            str(item.get("created_at", "")),
+        )
+    )
+
+    if not active_tasks:
+        st.success("No outstanding tasks for this shift.")
+        return
+
+    for task in active_tasks:
+        task_id = str(task["id"])
+        task_text = str(task.get("task", ""))
+
+        if st.checkbox(
+            task_text,
+            key=f"if_down_complete_{task_id}",
+            value=False,
+        ):
+            try:
+                saved, message = mark_if_down_task_complete(sb, task)
+                if saved:
+                    if "could not be sent" in message:
+                        st.warning(message)
+                    elif "already been recorded" in message:
+                        st.info(message)
+                    else:
+                        st.success(message)
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save task completion: {exc}")
+
+
+def render_if_down_management(sb: Client):
+    """Management controls for the three shift-specific task lists."""
+    st.subheader("Manage If Down To Do Lists")
+    st.caption(
+        "Add tasks to the relevant shift. Completed tasks remain recorded "
+        "in Supabase and do not return to the active list."
+    )
+
+    shift_names = [str(name) for name in SHIFT_ORDER]
+    if not shift_names:
+        st.error("No shift names were found in SHIFT_ORDER.")
+        return
+
+    try:
+        tasks = load_if_down_tasks(sb)
+        completions = load_if_down_completions(sb)
+    except Exception as exc:
+        st.error(f"Could not load If Down tasks: {exc}")
+        st.info(
+            "Create the if_down_tasks and if_down_completions tables in "
+            "Supabase using the setup SQL provided with this app."
+        )
+        return
+
+    completed_ids = {
+        str(item.get("task_id"))
+        for item in completions
+    }
+
+    with st.expander("Add a task", expanded=True):
+        with st.form("add_if_down_task_form", clear_on_submit=True):
+            new_task_shift = st.selectbox(
+                "Which shift is this task for?",
+                shift_names,
+                key="new_if_down_shift",
+            )
+            new_task_text = st.text_input(
+                "Task description",
+                placeholder="Describe the task to complete",
+            )
+            next_order = max(
+                [int(task.get("sort_order", 0)) for task in tasks] + [0]
+            ) + 10
+            new_task_order = st.number_input(
+                "Display order",
+                min_value=0,
+                max_value=100000,
+                value=next_order,
+                step=10,
+            )
+            add_task = st.form_submit_button("Add task")
+
+        if add_task:
+            if not new_task_text.strip():
+                st.error("Enter a task description.")
+            else:
+                try:
+                    sb.table("if_down_tasks").insert({
+                        "shift_name": new_task_shift,
+                        "task": new_task_text.strip(),
+                        "sort_order": int(new_task_order),
+                        "is_active": True,
+                    }).execute()
+                    st.success(f"Task added to {new_task_shift}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not add task: {exc}")
+
+    st.markdown("### Existing tasks")
+
+    shift_tabs = st.tabs(shift_names)
+
+    for shift_tab, shift_name in zip(shift_tabs, shift_names):
+        with shift_tab:
+            shift_tasks = [
+                task for task in tasks
+                if str(task.get("shift_name", "")) == shift_name
+            ]
+            shift_tasks.sort(
+                key=lambda item: (
+                    int(item.get("sort_order", 0)),
+                    str(item.get("created_at", "")),
+                )
+            )
+
+            if not shift_tasks:
+                st.caption("No tasks have been added to this shift.")
+                continue
+
+            for task in shift_tasks:
+                task_id = str(task["id"])
+                task_text = str(task.get("task", ""))
+                is_completed = task_id in completed_ids
+                is_active = bool(task.get("is_active", True))
+
+                if is_completed:
+                    status = "Completed"
+                elif is_active:
+                    status = "Active"
+                else:
+                    status = "Inactive"
+
+                with st.expander(f"{status} · {task_text}"):
+                    if is_completed:
+                        st.info(
+                            "This task has already been completed. It remains "
+                            "in the completion history and cannot be reset "
+                            "from this screen."
+                        )
+
+                    with st.form(f"edit_if_down_{task_id}"):
+                        edited_text = st.text_input(
+                            "Task description",
+                            value=task_text,
+                        )
+                        edited_order = st.number_input(
+                            "Display order",
+                            min_value=0,
+                            max_value=100000,
+                            value=int(task.get("sort_order", 0)),
+                            step=10,
+                        )
+                        edited_active = st.checkbox(
+                            "Show on the active list",
+                            value=is_active,
+                            disabled=is_completed,
+                        )
+                        save_task = st.form_submit_button("Save task")
+
+                    if save_task:
+                        if not edited_text.strip():
+                            st.error("Task description cannot be blank.")
+                        elif is_completed and edited_text.strip() != task_text:
+                            st.error(
+                                "Completed task text is kept as a historical "
+                                "record. Add a new task if the task needs to "
+                                "be changed."
+                            )
+                        else:
+                            try:
+                                sb.table("if_down_tasks").update({
+                                    "task": edited_text.strip(),
+                                    "sort_order": int(edited_order),
+                                    "is_active": (
+                                        is_active
+                                        if is_completed
+                                        else edited_active
+                                    ),
+                                }).eq("id", task_id).execute()
+                                st.success("Task updated.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Could not update task: {exc}")
+
+                    if not is_completed:
+                        if st.button(
+                            "Delete task",
+                            key=f"delete_if_down_{task_id}",
+                        ):
+                            try:
+                                sb.table("if_down_tasks").delete().eq(
+                                    "id", task_id
+                                ).execute()
+                                st.success("Task deleted.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Could not delete task: {exc}")
+
+    st.divider()
+    st.subheader("Email notification failures")
+
+    failed_emails = [
+        item for item in completions
+        if not item.get("email_sent", False)
+    ]
+
+    if not failed_emails:
+        st.success("All recorded task completion emails are marked as sent.")
+    else:
+        st.caption(
+            "These tasks are already completed. Retry sends the notification "
+            "again without restoring the task to the active list."
+        )
+
+        for completion in sorted(
+            failed_emails,
+            key=lambda item: str(item.get("completed_at", "")),
+            reverse=True,
+        ):
+            completion_id = str(completion.get("id"))
+            task_id = str(completion.get("task_id"))
+            task_text = str(completion.get("task_text", "Task"))
+            shift_name = str(completion.get("shift_name", "Shift"))
+            completed_raw = completion.get("completed_at", "")
+
+            try:
+                completed_at = parse_dt(completed_raw) or datetime.now(UK)
+                if completed_at.tzinfo is None:
+                    completed_at = completed_at.replace(tzinfo=UK)
+                completed_display = completed_at.astimezone(UK).strftime(
+                    "%d %b %Y %H:%M:%S"
+                )
+            except Exception:
+                completed_display = str(completed_raw)
+
+            st.markdown(
+                f"**{shift_name}: {task_text}**  \n"
+                f"Completed: {completed_display} UK time"
+            )
+
+            if completion.get("email_error"):
+                st.caption(f"Last email error: {completion['email_error']}")
+
+            if st.button(
+                "Retry email notification",
+                key=f"retry_if_down_email_{completion_id}",
+            ):
+                try:
+                    send_if_down_completion_email(
+                        task_text,
+                        shift_name,
+                        (
+                            parse_dt(completed_raw)
+                            or datetime.now(UK)
+                        ),
+                    )
+                    sb.table("if_down_completions").update({
+                        "email_sent": True,
+                        "email_error": None,
+                    }).eq("id", completion_id).execute()
+                    st.success("Notification email sent.")
+                    st.rerun()
+                except Exception as exc:
+                    sb.table("if_down_completions").update({
+                        "email_sent": False,
+                        "email_error": str(exc)[:1000],
+                    }).eq("id", completion_id).execute()
+                    st.error(f"Email retry failed: {exc}")
 
 
 # ---------------------------------------------------------------------
@@ -175,7 +628,6 @@ def valid_navigation_url(url: str) -> bool:
 # ---------------------------------------------------------------------
 
 def load_events(sb: Client) -> list[dict]:
-    """Fetch all event pages and normalize transport events."""
     try:
         rows = fetch_all_pages(
             lambda start, end: (
@@ -350,7 +802,6 @@ def render_saved_answers(
 
 
 def format_shift_heading(shift: dict) -> str:
-    """Format a shift heading using its actual start date and shift type."""
     return (
         f"{shift['start'].strftime('%a %d %b %Y')} · "
         f"{shift.get('shift_name', 'Shift')}"
@@ -361,7 +812,6 @@ def render_historical_answer(
     question: dict,
     snapshot: dict,
 ):
-    """Render a historical answer as read-only text."""
     key = question["question_key"]
     item = snapshot.get(key) or {}
 
@@ -413,16 +863,11 @@ def render_question_table(
     planned: dict,
     cil_planned: bool,
 ) -> dict:
-    """
-    Render questions with three read-only historical columns and one
-    current-shift answer column.
-    """
     previous_shifts = sorted(
         previous_shifts,
         key=lambda shift: shift["start"],
     )
 
-    # Keep the table at five columns even when fewer historical shifts exist.
     while len(previous_shifts) < 3:
         previous_shifts.insert(0, None)
 
@@ -432,10 +877,17 @@ def render_question_table(
             headings.append(f"Previous shift {3 - index}")
         else:
             headings.append(format_shift_heading(shift))
-    headings.append(format_shift_heading({
-        "start": st.session_state.get("_current_shift_start"),
-        "shift_name": st.session_state.get("_current_shift_name", "Current shift"),
-    }) if st.session_state.get("_current_shift_start") else "Current shift")
+
+    headings.append(
+        format_shift_heading({
+            "start": st.session_state.get("_current_shift_start"),
+            "shift_name": st.session_state.get(
+                "_current_shift_name", "Current shift"
+            ),
+        })
+        if st.session_state.get("_current_shift_start")
+        else "Current shift"
+    )
 
     widths = [2.0, 1.0, 1.0, 1.0, 1.35]
     header_columns = st.columns(widths, gap="small")
@@ -517,7 +969,8 @@ def require_management_password() -> bool:
 
     with st.form("management_login"):
         st.write(
-            "Enter the management password to manage questions and sidebar links."
+            "Enter the management password to manage questions, sidebar "
+            "links and If Down tasks."
         )
         password = st.text_input("Management password", type="password")
         submitted = st.form_submit_button("Unlock management area")
@@ -534,7 +987,19 @@ def require_management_password() -> bool:
 
 def management_page(sb: Client, questions: list[dict]):
     st.title("Management")
-    questions_tab, links_tab = st.tabs(["Questions", "Sidebar links"])
+
+    questions_tab, links_tab, if_down_tab = st.tabs([
+        "Questions",
+        "Sidebar links",
+        "If Down To Do Lists",
+    ])
+
+    with if_down_tab:
+        if st.button("Lock management area", key="lock_if_down_management"):
+            st.session_state.management_authenticated = False
+            st.rerun()
+
+        render_if_down_management(sb)
 
     with links_tab:
         st.subheader("Sidebar links")
@@ -573,14 +1038,12 @@ def management_page(sb: Client, questions: list[dict]):
                             "Enter a URL starting with https:// or http://."
                         )
                     else:
-                        sb.table("navigation_links").insert(
-                            {
-                                "label": label.strip(),
-                                "url": url.strip(),
-                                "sort_order": int(order),
-                                "is_active": True,
-                            }
-                        ).execute()
+                        sb.table("navigation_links").insert({
+                            "label": label.strip(),
+                            "url": url.strip(),
+                            "sort_order": int(order),
+                            "is_active": True,
+                        }).execute()
                         st.success("Sidebar link added.")
                         st.rerun()
 
@@ -614,38 +1077,32 @@ def management_page(sb: Client, questions: list[dict]):
                         )
                         save_link = st.form_submit_button("Save link")
 
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        if save_link:
-                            if not edit_label.strip():
-                                st.error("Enter a name for the link.")
-                            elif not valid_navigation_url(edit_url.strip()):
-                                st.error(
-                                    "Enter a URL starting with https:// or http://."
-                                )
-                            else:
-                                sb.table("navigation_links").update(
-                                    {
-                                        "label": edit_label.strip(),
-                                        "url": edit_url.strip(),
-                                        "sort_order": int(edit_order),
-                                        "is_active": active,
-                                    }
-                                ).eq("id", link["id"]).execute()
-                                st.success("Link updated.")
-                                st.rerun()
-
-                    with col2:
-                        if st.button(
-                            "Delete link",
-                            key=f"delete_link_{link['id']}",
-                        ):
-                            sb.table("navigation_links").delete().eq(
-                                "id", link["id"]
-                            ).execute()
-                            st.success("Link deleted.")
+                    if save_link:
+                        if not edit_label.strip():
+                            st.error("Enter a name for the link.")
+                        elif not valid_navigation_url(edit_url.strip()):
+                            st.error(
+                                "Enter a URL starting with https:// or http://."
+                            )
+                        else:
+                            sb.table("navigation_links").update({
+                                "label": edit_label.strip(),
+                                "url": edit_url.strip(),
+                                "sort_order": int(edit_order),
+                                "is_active": active,
+                            }).eq("id", link["id"]).execute()
+                            st.success("Link updated.")
                             st.rerun()
+
+                    if st.button(
+                        "Delete link",
+                        key=f"delete_link_{link['id']}",
+                    ):
+                        sb.table("navigation_links").delete().eq(
+                            "id", link["id"]
+                        ).execute()
+                        st.success("Link deleted.")
+                        st.rerun()
 
         except Exception as exc:
             st.error(f"Could not manage sidebar links: {exc}")
@@ -656,7 +1113,7 @@ def management_page(sb: Client, questions: list[dict]):
     with questions_tab:
         st.subheader("Manage shift questions")
 
-        if st.button("Lock management area"):
+        if st.button("Lock management area", key="lock_questions_management"):
             st.session_state.management_authenticated = False
             st.rerun()
 
@@ -855,17 +1312,15 @@ def management_page(sb: Client, questions: list[dict]):
                         rules = dict(old_rules)
                         rules["colour_rule"] = new_rule
 
-                        sb.table("shift_questions").update(
-                            {
-                                "label": new_label.strip(),
-                                "section": new_section,
-                                "input_type": new_type,
-                                "rules": rules,
-                                "options": options,
-                                "sort_order": int(order),
-                                "is_active": active,
-                            }
-                        ).eq("id", question["id"]).execute()
+                        sb.table("shift_questions").update({
+                            "label": new_label.strip(),
+                            "section": new_section,
+                            "input_type": new_type,
+                            "rules": rules,
+                            "options": options,
+                            "sort_order": int(order),
+                            "is_active": active,
+                        }).eq("id", question["id"]).execute()
 
                         st.success("Question updated.")
                         st.rerun()
@@ -895,7 +1350,7 @@ def render_question_input(
             label,
             value=str(value),
             disabled=True,
-            key=f"auto_{key}_(value)",
+            key=f"auto_{key}_{value}",
             label_visibility=label_visibility,
         )
         return value
@@ -1038,7 +1493,10 @@ def main():
         st.divider()
         st.caption("Shift rotation is calculated automatically.")
 
-        if st.button("Refresh calendar and records", use_container_width=True):
+        if st.button(
+            "Refresh calendar and records",
+            use_container_width=True,
+        ):
             st.session_state.pop("selected_shift_key", None)
             st.rerun()
 
@@ -1049,8 +1507,7 @@ def main():
 
     active_questions = sorted(
         [
-            question
-            for question in questions
+            question for question in questions
             if question.get("is_active", True)
         ],
         key=lambda question: int(question.get("sort_order", 0)),
@@ -1071,8 +1528,7 @@ def main():
 
     selected = next(
         (
-            shift
-            for shift in candidates
+            shift for shift in candidates
             if shift["key"] == st.session_state.selected_shift_key
         ),
         None,
@@ -1121,12 +1577,10 @@ def main():
     saved_answers = (saved or {}).get("answers") or {}
 
     previous_shifts = [
-        shift
-        for shift in all_shifts[:shift_index]
+        shift for shift in all_shifts[:shift_index]
         if shift["end"] <= selected["start"]
     ][-3:]
 
-    # The question table occupies the wider left column.
     left, right = st.columns([1.2, 1.0], gap="large")
 
     with left:
@@ -1142,13 +1596,9 @@ def main():
                 value=(saved or {}).get("submitted_by") or "",
             )
 
-            # The current shift heading uses the selected shift's actual date
-            # and shift name, rather than a hard-coded "Current shift" label.
             st.session_state["_current_shift_start"] = selected["start"]
             st.session_state["_current_shift_name"] = selected["shift_name"]
 
-            # Render the headings directly here so they are guaranteed to
-            # match the selected shift, even before the first form submission.
             historical = sorted(
                 previous_shifts,
                 key=lambda shift: shift["start"],
@@ -1277,7 +1727,7 @@ def main():
                     st.error(f"Could not save shift record: {exc}")
 
     # -----------------------------------------------------------------
-    # Transport list and totals — RIGHT
+    # Transport list, If Down list and totals — RIGHT
     # -----------------------------------------------------------------
 
     with right:
@@ -1330,16 +1780,14 @@ def main():
             else:
                 display_title = f"{title_text or 'Booking'} · {source}"
 
-            calendar_events.append(
-                {
-                    "id": str(event.get("id", "")),
-                    "title": display_title,
-                    "start": event["_start"].isoformat(),
-                    "end": event["_end"].isoformat(),
-                    "backgroundColor": colour,
-                    "borderColor": colour,
-                }
-            )
+            calendar_events.append({
+                "id": str(event.get("id", "")),
+                "title": display_title,
+                "start": event["_start"].isoformat(),
+                "end": event["_end"].isoformat(),
+                "backgroundColor": colour,
+                "borderColor": colour,
+            })
 
         overnight_shift = (
             selected["end"].date() != selected["start"].date()
@@ -1418,6 +1866,9 @@ def main():
                     f"{event['_start'].strftime('%a %H:%M')}–"
                     f"{event['_end'].strftime('%a %H:%M')}"
                 )
+
+        # Only show tasks assigned to the selected shift.
+        render_if_down_list(sb, selected)
 
         st.markdown("**Planned transport totals**")
         st.metric("Bulk inbound", planned["inbound_planned"])
