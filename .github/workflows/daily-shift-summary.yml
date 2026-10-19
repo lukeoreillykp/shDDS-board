@@ -1,0 +1,37 @@
+
+name: Daily DDS shift summary email
+
+on:
+  schedule:
+    - cron: "0 6,7 * * *"
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Send immediately for a manual test"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  send-summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install report dependency
+        run: |
+          python -m pip install --upgrade pip
+          pip install supabase
+      - name: Build and send daily summary
+        run: python scripts/daily_shift_summary.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          FORCE_RUN: ${{ inputs.force_run && 'true' || 'false' }}
