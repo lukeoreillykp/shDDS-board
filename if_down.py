@@ -521,7 +521,11 @@ def render_if_down_management(sb: Client) -> None:
                             "cannot be reset from this screen."
                         )
 
-                    with st.form(f"edit_if_down_{task_id}"):
+                    # Include the tab name because shared tasks can
+                    # appear in multiple tabs during the same run.
+                    with st.form(
+                        f"edit_if_down_{tab_name}_{task_id}"
+                    ):
                         edited_text = st.text_input(
                             "Task description",
                             value=task_text,
@@ -618,7 +622,9 @@ def render_if_down_management(sb: Client) -> None:
                     if not is_completed:
                         if st.button(
                             "Delete task",
-                            key=f"delete_if_down_{task_id}",
+                            key=(
+                                f"delete_if_down_{tab_name}_{task_id}"
+                            ),
                         ):
                             try:
                                 sb.table(
