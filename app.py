@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hmac
@@ -31,6 +30,11 @@ from warehouse_core.transport import (
 from if_down import (
     render_if_down_list,
     render_if_down_management,
+)
+from bulk_email import (
+    load_bulk_email_settings,
+    save_bulk_email_settings,
+    send_bulk_delivery_email,
 )
 
 st.set_page_config(
@@ -535,10 +539,11 @@ def require_management_password() -> bool:
 def management_page(sb: Client, questions: list[dict]):
     st.title("Management")
 
-    questions_tab, links_tab, if_down_tab = st.tabs([
+    questions_tab, links_tab, if_down_tab, bulk_email_tab = st.tabs([
         "Questions",
         "Sidebar links",
         "If Down To Do Lists",
+        "Bulk email",
     ])
 
     with if_down_tab:
@@ -547,6 +552,59 @@ def management_page(sb: Client, questions: list[dict]):
             st.rerun()
 
         render_if_down_management(sb)
+
+    with bulk_email_tab:
+        st.subheader("Bulk delivery email settings")
+        st.caption(
+            "Configure the main recipient and optional CC recipients for "
+            "emails sent from Bulk schedule deliveries."
+        )
+
+        try:
+            settings = load_bulk_email_settings(sb)
+
+            with st.form("bulk_email_settings_form"):
+                to_email = st.text_input(
+                    "Main recipient (To)",
+                    value=settings.get("to_email", ""),
+                    placeholder="recipient@example.com",
+                )
+                cc_emails = st.text_area(
+                    "CC recipients",
+                    value=", ".join(settings.get("cc_emails", [])),
+                    placeholder="person1@example.com, person2@example.com",
+                    help="Separate multiple addresses with commas, semicolons, or new lines.",
+                )
+
+                save_settings = st.form_submit_button(
+                    "Save Bulk email settings",
+                    type="primary",
+                )
+
+            if save_settings:
+                try:
+                    saved_settings = save_bulk_email_settings(
+                        sb,
+                        to_email,
+                        cc_emails,
+                    )
+                    st.success("Bulk email settings saved.")
+                    st.write(f"**To:** {saved_settings['to_email']}")
+                    st.write(
+                        "**CC:** "
+                        + (", ".join(saved_settings["cc_emails"]) or "None")
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Could not save Bulk email settings: {exc}")
+        except Exception as exc:
+            st.error(f"Could not load Bulk email settings: {exc}")
+            st.info(
+                "Check that bulk_email_settings exists in Supabase and that "
+                "the app uses the Supabase service-role key."
+            )
 
     with links_tab:
         st.subheader("Sidebar links")
@@ -1413,6 +1471,69 @@ def main():
                     f"{event['_start'].strftime('%a %H:%M')}–"
                     f"{event['_end'].strftime('%a %H:%M')}"
                 )
+
+        # -------------------------------------------------------------
+        # Bulk delivery email controls
+        # -------------------------------------------------------------
+
+        st.markdown("### Bulk delivery emails")
+
+        bulk_events = []
+        for event in shift_events:
+            source_text = " ".join(
+                str(event.get(field) or "")
+                for field in ("source", "load_header", "category", "title")
+            ).casefold()
+
+            if "bulk" in source_text:
+                bulk_events.append(event)
+
+        if not bulk_events:
+            st.caption("No Bulk deliveries overlap this shift.")
+        else:
+            for event in sorted(
+                bulk_events,
+                key=lambda item: item.get("_start") or selected["start"],
+            ):
+                event_id = str(event.get("id") or "").strip()
+                title_text = str(event.get("title") or "Bulk delivery")
+                event_start = event.get("_start")
+
+                time_label = (
+                    event_start.astimezone(UK).strftime("%a %d %b %Y, %H:%M")
+                    if event_start
+                    else "Time not available"
+                )
+
+                with st.container(border=True):
+                    st.markdown(f"**{title_text}**")
+                    st.caption(time_label)
+
+                    if not event_id:
+                        st.error(
+                            "This booking has no event ID and cannot be "
+                            "emailed safely."
+                        )
+                        continue
+
+                    if st.button(
+                        "Email delivery details",
+                        key=f"email_bulk_delivery_{event_id}",
+                        use_container_width=True,
+                    ):
+                        with st.spinner("Sending Bulk delivery email..."):
+                            success, message = send_bulk_delivery_email(
+                                sb,
+                                event,
+                                event_id,
+                            )
+
+                        if success:
+                            st.success(message)
+                        elif "already been emailed" in message.casefold():
+                            st.info(message)
+                        else:
+                            st.error(message)
 
         # The implementation now lives in if_down.py.
         render_if_down_list(sb, selected)
