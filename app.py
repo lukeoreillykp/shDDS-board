@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hmac
@@ -40,37 +41,169 @@ st.set_page_config(
     layout="wide",
 )
 
-# Compact landscape-friendly layout for PCs and tablets.
+# Compact landscape layout: smaller header, reduced top whitespace,
+# shorter widgets, tighter spacing, and maximum usable screen width.
 st.markdown(
     """
     <style>
+    /* Main page width and top spacing */
+    .stApp [data-testid="stMainBlockContainer"],
+    .main .block-container,
     .block-container {
-        max-width: 100%;
-        padding-top: .65rem;
-        padding-bottom: .65rem;
-        padding-left: 1rem;
-        padding-right: 1rem;
+        max-width: 100% !important;
+        padding-top: 0rem !important;
+        padding-bottom: .45rem !important;
+        padding-left: .8rem !important;
+        padding-right: .8rem !important;
     }
-    h1 { font-size: 1.55rem !important; margin-bottom: .2rem !important; }
-    h2 { font-size: 1.2rem !important; margin-bottom: .2rem !important; }
-    h3 { font-size: 1rem !important; margin-top: .35rem !important; margin-bottom: .15rem !important; }
-    div[data-testid="stVerticalBlock"] { gap: .35rem; }
-    div[data-testid="stMarkdownContainer"] p { margin-bottom: .15rem; }
-    div[data-testid="stWidgetLabel"] p { font-size: .8rem; margin-bottom: .1rem; }
+
+    /* Reduce the Streamlit top toolbar height */
+    [data-testid="stHeader"] {
+        height: 1.5rem !important;
+        min-height: 1.5rem !important;
+        background: transparent !important;
+    }
+
+    /* Compact all headings */
+    h1, [data-testid="stHeading"] h1 {
+        font-size: 1.15rem !important;
+        line-height: 1.25 !important;
+        margin-top: 0 !important;
+        margin-bottom: .2rem !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+
+    h2, [data-testid="stHeading"] h2 {
+        font-size: 1rem !important;
+        line-height: 1.25 !important;
+        margin-top: .15rem !important;
+        margin-bottom: .2rem !important;
+    }
+
+    h3, [data-testid="stHeading"] h3 {
+        font-size: .9rem !important;
+        line-height: 1.25 !important;
+        margin-top: .15rem !important;
+        margin-bottom: .15rem !important;
+    }
+
+    /* Reduce vertical whitespace */
+    div[data-testid="stVerticalBlock"] {
+        gap: .25rem !important;
+    }
+
+    div[data-testid="stHorizontalBlock"] {
+        gap: .5rem !important;
+    }
+
+    div[data-testid="stMarkdownContainer"] p {
+        margin-top: 0 !important;
+        margin-bottom: .12rem !important;
+        font-size: .86rem;
+    }
+
+    [data-testid="stCaptionContainer"] {
+        font-size: .72rem !important;
+        line-height: 1.25 !important;
+        margin-top: 0 !important;
+        margin-bottom: .1rem !important;
+    }
+
+    [data-testid="stWidgetLabel"] {
+        padding-bottom: 0 !important;
+    }
+
+    [data-testid="stWidgetLabel"] p {
+        font-size: .75rem !important;
+        margin-bottom: 0 !important;
+    }
+
+    /* Shorter text, number and selection fields */
     div[data-testid="stTextInput"] input,
-    div[data-testid="stNumberInput"] input,
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] {
-        min-height: 1.9rem;
+    div[data-testid="stNumberInput"] input {
+        min-height: 1.8rem !important;
+        height: 1.8rem !important;
+        font-size: .85rem !important;
     }
-    div[data-testid="stTextArea"] textarea { min-height: 3rem; }
-    [data-testid="stMetric"] { padding: .2rem .4rem; }
+
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] {
+        min-height: 1.8rem !important;
+        font-size: .82rem !important;
+    }
+
+    div[data-testid="stTextArea"] textarea {
+        min-height: 2.5rem !important;
+        font-size: .82rem !important;
+    }
+
+    /* Smaller buttons and less padding */
+    .stButton button,
+    .stFormSubmitButton button {
+        min-height: 1.8rem !important;
+        padding: .2rem .5rem !important;
+        font-size: .8rem !important;
+    }
+
+    [data-testid="stMetric"] {
+        padding: .1rem .25rem !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.15rem !important;
+    }
+
+    [data-testid="stMetricLabel"] {
+        font-size: .72rem !important;
+    }
+
+    /* Less whitespace around separators and tabs */
+    hr {
+        margin: .25rem 0 !important;
+    }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: .25rem !important;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        padding: .3rem .55rem !important;
+        font-size: .8rem !important;
+    }
+
+    [data-testid="stExpander"] details {
+        padding: .25rem .5rem !important;
+    }
+
+    /* Compact sidebar */
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        gap: .25rem !important;
+    }
+
+    /* Landscape tablet and smaller desktop screens */
     @media (min-width: 900px) {
-        .block-container { padding-top: .5rem; }
+        .stApp [data-testid="stMainBlockContainer"],
+        .block-container {
+            padding-top: 0 !important;
+            padding-left: .6rem !important;
+            padding-right: .6rem !important;
+        }
+    }
+
+    @media (max-width: 1100px) {
+        h1, [data-testid="stHeading"] h1 {
+            font-size: 1.05rem !important;
+        }
+
+        h2, [data-testid="stHeading"] h2 {
+            font-size: .95rem !important;
+        }
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
 
 DEFAULT_QUESTIONS = [
     {"question_key": "safety_trigger", "label": "Safety trigger", "section": "Safety & quality", "input_type": "choice", "rules": {"colour_rule": "severity_lmh"}, "options": ["L", "M", "H"], "sort_order": 10, "is_active": True, "is_system": True},
@@ -297,13 +430,7 @@ def snapshot_answers(
 
 
 def autosave_shift_answers():
-    """
-    Save the current shift when an answer widget changes.
-
-    This callback runs before Streamlit redraws the page. It reads all current
-    widget values from session state so the saved snapshot includes the other
-    answers already entered for this shift.
-    """
+    """Persist the current shift snapshot whenever an editable field changes."""
     sb = st.session_state.get("supabase_client")
     selected = st.session_state.get("_autosave_selected_shift")
     questions = st.session_state.get("_autosave_questions") or []
@@ -328,7 +455,6 @@ def autosave_shift_answers():
             widget_key = f"input_{shift_key}_{key}"
             value = st.session_state.get(widget_key, "")
 
-            # Convert the placeholder shown by choice widgets into a blank.
             if value == "— Select —":
                 value = ""
 
@@ -354,26 +480,32 @@ def autosave_shift_answers():
         row_id_key = f"_autosave_row_id_{shift_key}"
         row_id = st.session_state.get(row_id_key)
 
+        # Recover an existing row before inserting. This also helps if the
+        # insert succeeded but the previous response did not return its ID.
+        if not row_id:
+            matches = (
+                sb.table("shift_submissions")
+                .select("id")
+                .eq("shift_start", selected["start"].isoformat())
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if matches and matches[0].get("id"):
+                row_id = matches[0]["id"]
+                st.session_state[row_id_key] = row_id
+
         if row_id:
-            sb.table("shift_submissions").update(row).eq("id", row_id).execute()
+            sb.table("shift_submissions").update(row).eq(
+                "id", row_id
+            ).execute()
         else:
             result = sb.table("shift_submissions").insert(row).execute()
             inserted = result.data or []
 
             if inserted and inserted[0].get("id"):
                 st.session_state[row_id_key] = inserted[0]["id"]
-            else:
-                # Recover the ID if the insert response does not include it.
-                matches = (
-                    sb.table("shift_submissions")
-                    .select("id")
-                    .eq("shift_start", selected["start"].isoformat())
-                    .execute()
-                    .data
-                    or []
-                )
-                if matches:
-                    st.session_state[row_id_key] = matches[0]["id"]
 
         st.session_state["_autosave_last_error"] = ""
         st.session_state["_autosave_last_saved"] = datetime.now(UK).strftime(
@@ -402,7 +534,7 @@ def badge_text(value, colour: str | None) -> str:
 
 def format_shift_heading(shift: dict) -> str:
     return (
-        f"{shift['start'].strftime('%a %d %b %Y')} · "
+        f"{shift['start'].strftime('%a %d %b')} · "
         f"{shift.get('shift_name', 'Shift')}"
     )
 
@@ -955,7 +1087,7 @@ def render_question_input(
         key=widget_key,
         disabled=disabled,
         on_change=autosave_shift_answers,
-        height=56 if compact else 80,
+        height=48 if compact else 72,
         label_visibility=label_visibility,
     )
 
@@ -1046,27 +1178,49 @@ def main():
 
     all_shifts, shift_index = adjacent_shifts(selected)
 
-    previous_button, next_button = st.columns(2)
+    previous_button, next_button = st.columns(2, gap="small")
 
     with previous_button:
-        if shift_index > 0 and st.button("← Previous shift"):
+        if shift_index > 0 and st.button(
+            "← Previous shift", use_container_width=True
+        ):
             st.session_state.selected_shift_key = all_shifts[shift_index - 1]["key"]
             st.rerun()
 
     with next_button:
-        if shift_index + 1 < len(all_shifts) and st.button("Next shift →"):
+        if shift_index + 1 < len(all_shifts) and st.button(
+            "Next shift →", use_container_width=True
+        ):
             st.session_state.selected_shift_key = all_shifts[shift_index + 1]["key"]
             st.rerun()
 
-    team_hex = COLOUR_HEX.get(selected["team_colour"], "#666666")
+    # Simplified team tag: date, shift name and team only.
+    team_name = str(selected.get("team_colour") or "Team")
+    team_hex = COLOUR_HEX.get(team_name, "#666666")
+    shift_date_label = selected["start"].strftime("%a %d %b %Y")
+    shift_name_label = str(selected.get("shift_name") or "Shift")
+
     st.markdown(
-        f"<div style='padding:8px 12px;border-radius:8px;"
-        f"background:{team_hex}18;border-left:5px solid {team_hex};"
-        f"margin-bottom:8px'>"
-        f"<b>{selected['label']}</b><br>"
-        f"{selected['start'].strftime('%a %d %b %Y, %H:%M')} – "
-        f"{selected['end'].strftime('%a %d %b %Y, %H:%M')} (UK time)"
-        f"</div>",
+        f"""
+        <div style="
+            display:inline-flex;
+            align-items:center;
+            gap:7px;
+            padding:4px 9px;
+            border-radius:5px;
+            background:{team_hex}18;
+            border-left:4px solid {team_hex};
+            margin:0 0 4px 0;
+            font-size:.78rem;
+            line-height:1.25;
+        ">
+            <span style="font-weight:600">{shift_date_label}</span>
+            <span>·</span>
+            <span>{shift_name_label}</span>
+            <span>·</span>
+            <span style="font-weight:700;color:{team_hex}">{team_name} Team</span>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -1093,7 +1247,7 @@ def main():
     if (saved or {}).get("id"):
         st.session_state[row_id_key] = saved["id"]
 
-    left, right = st.columns([1.2, 1.0], gap="medium")
+    left, right = st.columns([1.35, 1.0], gap="small")
 
     with left:
         st.subheader("Shift questions and answers")
@@ -1122,11 +1276,11 @@ def main():
         for index, past_shift in enumerate(historical):
             headings.append(
                 format_shift_heading(past_shift)
-                if past_shift else f"Previous shift {3 - index}"
+                if past_shift else f"Previous {3 - index}"
             )
         headings.append(format_shift_heading(selected))
 
-        widths = [1.7, 0.9, 0.9, 0.9, 1.15]
+        widths = [1.55, .78, .78, .78, 1.0]
         header_columns = st.columns(widths, gap="small")
         for column, heading in zip(header_columns, headings):
             with column:
@@ -1173,8 +1327,7 @@ def main():
 
                     widget_key = f"input_{selected['key']}_{key}"
 
-                    # Initialise each shift's widget only once from Supabase.
-                    # Do not overwrite widget state on every Streamlit rerun.
+                    # Initialise each shift's widget once from the saved data.
                     if widget_key not in st.session_state:
                         kind = question.get("input_type", "text")
                         if kind in ("choice", "yes_no") and old_value in (None, ""):
@@ -1278,7 +1431,7 @@ def main():
                 "center": "title",
                 "right": "",
             },
-            "height": 420,
+            "height": 350,
             "nowIndicator": True,
             "timeZone": "local",
             "firstDay": 1,
@@ -1390,9 +1543,13 @@ def main():
         render_if_down_list(sb, selected)
 
         st.markdown("**Planned transport totals**")
-        st.metric("Bulk inbound", planned["inbound_planned"])
-        st.metric("Campeys outbound", planned["outbound_planned_campeys"])
-        st.metric("DHL outbound", planned["outbound_planned_dhl"])
+        metric_columns = st.columns(3, gap="small")
+        with metric_columns[0]:
+            st.metric("Bulk inbound", planned["inbound_planned"])
+        with metric_columns[1]:
+            st.metric("Campeys outbound", planned["outbound_planned_campeys"])
+        with metric_columns[2]:
+            st.metric("DHL outbound", planned["outbound_planned_dhl"])
 
     st.caption(
         "Team-colour rotation is anchored to the week beginning "
