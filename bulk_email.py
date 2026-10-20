@@ -1,4 +1,3 @@
-
 """Email notifications for deliveries from the Bulk schedule."""
 
 import re
@@ -24,8 +23,10 @@ EMAIL_PATTERN = re.compile(
 )
 
 
-def parse_email_addresses(value: str | list[str] | None) -> list[str]:
-    """Parse comma-, semicolon-, or newline-separated email addresses."""
+def parse_email_addresses(
+    value: str | list[str] | None,
+) -> list[str]:
+    """Parse and validate comma-, semicolon-, or newline-separated emails."""
     if not value:
         return []
 
@@ -47,6 +48,7 @@ def parse_email_addresses(value: str | list[str] | None) -> list[str]:
             raise ValueError(f"Invalid email address: {address}")
 
         key = address.casefold()
+
         if key not in seen:
             addresses.append(address)
             seen.add(key)
@@ -55,10 +57,7 @@ def parse_email_addresses(value: str | list[str] | None) -> list[str]:
 
 
 def load_bulk_email_settings(sb: Client) -> dict[str, Any]:
-    """Load the saved Bulk email recipients from Supabase.
-
-    Requires a settings table with a single row whose id is 1.
-    """
+    """Load the saved Bulk email recipients from Supabase."""
     rows = (
         sb.table(SETTINGS_TABLE)
         .select("id,to_email,cc_emails")
@@ -75,11 +74,7 @@ def load_bulk_email_settings(sb: Client) -> dict[str, Any]:
     row = rows[0]
     cc_value = row.get("cc_emails") or []
 
-    # The database may store CC as a JSON array or a text field.
-    if isinstance(cc_value, str):
-        cc_addresses = parse_email_addresses(cc_value)
-    else:
-        cc_addresses = parse_email_addresses(cc_value)
+    cc_addresses = parse_email_addresses(cc_value)
 
     return {
         "to_email": str(row.get("to_email") or ""),
@@ -92,21 +87,24 @@ def save_bulk_email_settings(
     to_email: str,
     cc_emails: str | list[str],
 ) -> dict[str, Any]:
-    """Validate and persist the Bulk email To and CC recipients."""
+    """Validate and save the Bulk email recipients."""
     to_addresses = parse_email_addresses(to_email)
+
     if len(to_addresses) != 1:
-        raise ValueError("Enter exactly one main recipient email address.")
+        raise ValueError(
+            "Enter exactly one main recipient email address."
+        )
 
     cc_addresses = parse_email_addresses(cc_emails)
 
-    if to_addresses[0].casefold() in {
-        address.casefold() for address in cc_addresses
-    }:
-        cc_addresses = [
-            address
-            for address in cc_addresses
-            if address.casefold() != to_addresses[0].casefold()
-        ]
+    # Do not duplicate the main recipient in CC.
+    main_recipient = to_addresses[0].casefold()
+
+    cc_addresses = [
+        address
+        for address in cc_addresses
+        if address.casefold() != main_recipient
+    ]
 
     payload = {
         "id": 1,
@@ -126,86 +124,60 @@ def save_bulk_email_settings(
     }
 
 
-def format_delivery_email(delivery: dict[str, Any]) -> tuple[str, str]:
-    """Create an email subject and readable body from a Bulk delivery.
-
-    Pass the original Bulk-schedule delivery record. Common fields are
-    included when available; unknown fields are not fabricated.
+def format_delivery_email(
+    delivery: dict[str, Any],
+) -> tuple[str, str]:
     """
+    Build the POD email subject and body.
+
+    The load information is shared between the subject and body.
+    """
+
     def first_value(*keys: str) -> str:
         for key in keys:
             value = delivery.get(key)
+
             if value is not None and str(value).strip():
                 return str(value).strip()
+
         return ""
 
-    reference = first_value(
-        "reference", "load_ref", "load_reference",
-        "booking_reference", "ref", "id",
+    # Prefer the load information currently used by the Bulk entry.
+    load_info = first_value(
+        "load",
+        "load_description",
+        "description",
+        "title",
     )
-    delivery_date = first_value(
-        "delivery_date", "date", "planned_date", "start",
+
+    # Fallbacks in case the entry uses a reference field instead.
+    if not load_info:
+        load_info = first_value(
+            "reference",
+            "load_ref",
+            "load_reference",
+            "booking_reference",
+            "ref",
+            "id",
+        )
+
+    if not load_info:
+        load_info = "Delivery details"
+
+    # Keep the subject on one line.
+    load_info = " ".join(load_info.split())
+
+    subject = f"POD - {load_info}"
+
+    body = (
+        "Hi,\n\n"
+        "Please take this email as proof of receipt of the following load:\n\n"
+        f"Load: {load_info}\n\n"
+        "Kind regards,\n"
+        "KP Ponte"
     )
-    delivery_time = first_value(
-        "delivery_time", "time", "planned_time",
-    )
-    vehicle = first_value("vehicle", "vehicle_type", "registration")
-    load = first_value("load", "load_description", "description", "title")
-    customer = first_value("customer", "supplier", "site", "destination")
-    notes = first_value("notes", "comments", "instructions")
 
-    subject_reference = reference or "Delivery details"
-    subject = f"Bulk delivery — {subject_reference}"
-
-    lines = [
-        "Bulk schedule delivery details",
-        "",
-    ]
-
-    fields = [
-        ("Reference", reference),
-        ("Date", delivery_date),
-        ("Time", delivery_time),
-        ("Vehicle", vehicle),
-        ("Load", load),
-        ("Customer / destination", customer),
-        ("Notes", notes),
-    ]
-
-    for label, value in fields:
-        if value:
-            lines.append(f"{label}: {value}")
-
-    # Include other source fields so useful delivery details are not lost.
-    known_keys = {
-        "reference", "load_ref", "load_reference",
-        "booking_reference", "ref", "id",
-        "delivery_date", "date", "planned_date", "start",
-        "delivery_time", "time", "planned_time",
-        "vehicle", "vehicle_type", "registration",
-        "load", "load_description", "description", "title",
-        "customer", "supplier", "site", "destination",
-        "notes", "comments", "instructions",
-        "source", "category",
-    }
-
-    extras = [
-        (str(key), str(value).strip())
-        for key, value in delivery.items()
-        if key not in known_keys
-        and value is not None
-        and str(value).strip()
-        and not isinstance(value, (dict, list))
-    ]
-
-    if extras:
-        lines.extend(["", "Additional delivery information:"])
-        for label, value in extras:
-            lines.append(f"{label.replace('_', ' ').title()}: {value}")
-
-    lines.extend(["", "Sent from SHDDS."])
-
-    return subject, "\n".join(lines)
+    return subject, body
 
 
 def send_bulk_delivery_email(
@@ -213,19 +185,15 @@ def send_bulk_delivery_email(
     delivery: dict[str, Any],
     delivery_id: str,
 ) -> tuple[bool, str]:
-    """Send one Bulk delivery email and record the outcome.
+    """Send a Bulk POD email and record the outcome in Supabase."""
 
-    This function expects the send-log table described in the SQL
-    setup. It refuses to resend a delivery already marked as sent.
-
-    Note: the log check and SMTP send are not an atomic operation.
-    """
     if not delivery_id or not str(delivery_id).strip():
         return False, "The delivery has no stable identifier."
 
     stable_id = str(delivery_id).strip()
 
     try:
+        # Prevent sending a second email for an already-confirmed delivery.
         existing = (
             sb.table(SEND_LOG_TABLE)
             .select("delivery_id,status")
@@ -239,16 +207,30 @@ def send_bulk_delivery_email(
         if existing and existing[0].get("status") == "sent":
             return False, "This delivery has already been emailed."
 
+        # Load recipients saved in the Management settings.
         settings = load_bulk_email_settings(sb)
+
         to_email = settings["to_email"]
         cc_emails = settings["cc_emails"]
 
         recipients = parse_email_addresses(to_email)
-        if len(recipients) != 1:
-            return False, "Configure a valid To address in Management."
 
-        if not st.secrets.get("GMAIL_APP_PASSWORD", "").strip():
-            return False, "GMAIL_APP_PASSWORD is missing from Streamlit secrets."
+        if len(recipients) != 1:
+            return (
+                False,
+                "Configure a valid To address in Management.",
+            )
+
+        # Read the Gmail app password from Streamlit Cloud Secrets.
+        password = str(
+            st.secrets.get("GMAIL_APP_PASSWORD", "")
+        ).strip()
+
+        if not password:
+            return (
+                False,
+                "GMAIL_APP_PASSWORD is missing from Streamlit secrets.",
+            )
 
         subject, body = format_delivery_email(delivery)
 
@@ -262,21 +244,26 @@ def send_bulk_delivery_email(
 
         message.set_content(body)
 
-        smtp_recipients = list(dict.fromkeys(recipients + cc_emails))
-        password = str(st.secrets["GMAIL_APP_PASSWORD"]).strip()
+        smtp_recipients = list(
+            dict.fromkeys(recipients + cc_emails)
+        )
 
+        # Send using the existing Gmail SMTP configuration.
         with smtplib.SMTP_SSL(
             "smtp.gmail.com",
             465,
             timeout=20,
         ) as smtp:
             smtp.login(EMAIL_SENDER, password)
+
             smtp.send_message(
                 message,
                 from_addr=EMAIL_SENDER,
                 to_addrs=smtp_recipients,
             )
 
+        # Record successful delivery so the app can remember it
+        # after a refresh.
         sb.table(SEND_LOG_TABLE).upsert(
             {
                 "delivery_id": stable_id,
@@ -290,11 +277,13 @@ def send_bulk_delivery_email(
             on_conflict="delivery_id",
         ).execute()
 
-        return True, "Bulk delivery email sent successfully."
+        return True, "Bulk POD email sent successfully."
 
     except Exception as exc:
         error_text = str(exc)[:1000]
 
+        # Log the failure without marking the delivery as sent.
+        # A later retry can update this same log entry.
         try:
             sb.table(SEND_LOG_TABLE).upsert(
                 {
@@ -307,14 +296,17 @@ def send_bulk_delivery_email(
         except Exception:
             pass
 
-        return False, f"Could not send Bulk delivery email: {error_text}"
+        return (
+            False,
+            f"Could not send Bulk POD email: {error_text}",
+        )
 
 
 def get_bulk_email_status(
     sb: Client,
     delivery_id: str,
 ) -> dict[str, Any] | None:
-    """Return the send-log entry for a delivery, if one exists."""
+    """Return the saved email status for a delivery, if available."""
     rows = (
         sb.table(SEND_LOG_TABLE)
         .select("*")
@@ -324,4 +316,5 @@ def get_bulk_email_status(
         .data
         or []
     )
+
     return rows[0] if rows else None
