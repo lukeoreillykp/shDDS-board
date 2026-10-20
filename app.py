@@ -27,10 +27,7 @@ from warehouse_core.transport import (
     planned_counts,
     fetch_all_pages,
 )
-from if_down import (
-    render_if_down_list,
-    render_if_down_management,
-)
+from if_down import render_if_down_list, render_if_down_management
 from bulk_email import (
     load_bulk_email_settings,
     save_bulk_email_settings,
@@ -41,6 +38,38 @@ st.set_page_config(
     page_title="Warehouse Shift Hub",
     page_icon="🏭",
     layout="wide",
+)
+
+# Compact landscape-friendly layout for PCs and tablets.
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 100%;
+        padding-top: .65rem;
+        padding-bottom: .65rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+    h1 { font-size: 1.55rem !important; margin-bottom: .2rem !important; }
+    h2 { font-size: 1.2rem !important; margin-bottom: .2rem !important; }
+    h3 { font-size: 1rem !important; margin-top: .35rem !important; margin-bottom: .15rem !important; }
+    div[data-testid="stVerticalBlock"] { gap: .35rem; }
+    div[data-testid="stMarkdownContainer"] p { margin-bottom: .15rem; }
+    div[data-testid="stWidgetLabel"] p { font-size: .8rem; margin-bottom: .1rem; }
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stNumberInput"] input,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] {
+        min-height: 1.9rem;
+    }
+    div[data-testid="stTextArea"] textarea { min-height: 3rem; }
+    [data-testid="stMetric"] { padding: .2rem .4rem; }
+    @media (min-width: 900px) {
+        .block-container { padding-top: .5rem; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 DEFAULT_QUESTIONS = [
@@ -84,10 +113,7 @@ def get_supabase() -> Client:
     return st.session_state.supabase_client
 
 
-def choose_default_shift(
-    now: datetime,
-    events: list[dict] | None = None,
-) -> dict:
+def choose_default_shift(now: datetime, events: list[dict] | None = None) -> dict:
     shifts = shifts_between(
         now.date() - timedelta(days=14),
         now.date() + timedelta(days=35),
@@ -232,37 +258,13 @@ def load_submissions(
     return {str(row.get("shift_start")): row for row in rows}
 
 
-def submission_for(
-    submissions: dict[str, dict],
-    shift: dict,
-) -> dict | None:
+def submission_for(submissions: dict[str, dict], shift: dict) -> dict | None:
     target = shift["start"].isoformat()
-
     for key, row in submissions.items():
         dt = parse_dt(key)
         if dt and dt == shift["start"]:
             return row
-
     return submissions.get(target)
-
-
-# ---------------------------------------------------------------------
-# Answer colours and display
-# ---------------------------------------------------------------------
-
-def badge_text(value, colour: str | None) -> str:
-    shown = "Blank" if value is None or value == "" else str(value)
-
-    if colour == "green":
-        return f"🟢 {shown}"
-    if colour == "red":
-        return f"🔴 {shown}"
-    if colour == "amber":
-        return f"🟠 {shown}"
-    if colour == "grey":
-        return f"⚪ {shown}"
-
-    return shown
 
 
 def snapshot_answers(
@@ -294,62 +296,108 @@ def snapshot_answers(
     return result
 
 
-def render_saved_answers(
-    snapshot: dict,
-    planned: dict | None = None,
-):
-    planned = dict(planned or {})
+def autosave_shift_answers():
+    """
+    Save the current shift when an answer widget changes.
 
-    for key in (
-        "inbound_planned",
-        "outbound_planned_campeys",
-        "outbound_planned_dhl",
-    ):
-        item = snapshot.get(key) or {}
-        value = item.get("value")
+    This callback runs before Streamlit redraws the page. It reads all current
+    widget values from session state so the saved snapshot includes the other
+    answers already entered for this shift.
+    """
+    sb = st.session_state.get("supabase_client")
+    selected = st.session_state.get("_autosave_selected_shift")
+    questions = st.session_state.get("_autosave_questions") or []
+    planned = st.session_state.get("_autosave_planned") or {}
+    cil_planned = bool(st.session_state.get("_autosave_cil_planned", False))
+    shift_key = st.session_state.get("_active_shift_key")
 
-        if value not in (None, "", "N/A"):
-            try:
-                planned[key] = int(value)
-            except (TypeError, ValueError):
-                pass
-
-    if not snapshot:
-        st.caption("No answers have been saved for this shift yet.")
+    if not sb or not selected or not questions or not shift_key:
         return
 
-    answer_values = {
-        key: (item or {}).get("value", "")
-        for key, item in snapshot.items()
+    values = {}
+
+    for question in questions:
+        key = question["question_key"]
+        kind = question.get("input_type", "text")
+
+        if kind == "auto":
+            values[key] = planned.get(key, 0)
+        elif key == "cil_completion" and not cil_planned:
+            values[key] = "N/A"
+        else:
+            widget_key = f"input_{shift_key}_{key}"
+            value = st.session_state.get(widget_key, "")
+
+            # Convert the placeholder shown by choice widgets into a blank.
+            if value == "— Select —":
+                value = ""
+
+            values[key] = value
+
+    snapshot = snapshot_answers(questions, values, planned, cil_planned)
+    submitter = str(
+        st.session_state.get(f"submitter_{shift_key}", "") or ""
+    ).strip()
+
+    row = {
+        "shift_date": selected["shift_date"],
+        "shift_name": selected["shift_name"],
+        "shift_start": selected["start"].isoformat(),
+        "shift_end": selected["end"].isoformat(),
+        "team_colour": selected["team_colour"],
+        "answers": snapshot,
+        "submitted_by": submitter or None,
+        "updated_at": datetime.now(UK).isoformat(),
     }
 
-    sections = dict.fromkeys(
-        (item.get("section") or "General")
-        for item in snapshot.values()
-    )
+    try:
+        row_id_key = f"_autosave_row_id_{shift_key}"
+        row_id = st.session_state.get(row_id_key)
 
-    for section in sections:
-        st.markdown(f"**{section}**")
+        if row_id:
+            sb.table("shift_submissions").update(row).eq("id", row_id).execute()
+        else:
+            result = sb.table("shift_submissions").insert(row).execute()
+            inserted = result.data or []
 
-        for key, item in snapshot.items():
-            if (item.get("section") or "General") != section:
-                continue
+            if inserted and inserted[0].get("id"):
+                st.session_state[row_id_key] = inserted[0]["id"]
+            else:
+                # Recover the ID if the insert response does not include it.
+                matches = (
+                    sb.table("shift_submissions")
+                    .select("id")
+                    .eq("shift_start", selected["start"].isoformat())
+                    .execute()
+                    .data
+                    or []
+                )
+                if matches:
+                    st.session_state[row_id_key] = matches[0]["id"]
 
-            value = item.get("value", "")
-            colour = answer_colour(
-                {"rules": item.get("rules") or {}},
-                value,
-                planned,
-                answer_values,
-            )
+        st.session_state["_autosave_last_error"] = ""
+        st.session_state["_autosave_last_saved"] = datetime.now(UK).strftime(
+            "%H:%M:%S"
+        )
+    except Exception as exc:
+        st.session_state["_autosave_last_error"] = str(exc)
 
-            if value == "N/A":
-                colour = "grey"
 
-            st.markdown(
-                f"- **{item.get('label', key)}:** "
-                f"{badge_text(value, colour)}"
-            )
+# ---------------------------------------------------------------------
+# Answer colours and historical display
+# ---------------------------------------------------------------------
+
+def badge_text(value, colour: str | None) -> str:
+    shown = "Blank" if value is None or value == "" else str(value)
+    if colour == "green":
+        return f"🟢 {shown}"
+    if colour == "red":
+        return f"🔴 {shown}"
+    if colour == "amber":
+        return f"🟠 {shown}"
+    if colour == "grey":
+        return f"⚪ {shown}"
+    return shown
 
 
 def format_shift_heading(shift: dict) -> str:
@@ -359,10 +407,7 @@ def format_shift_heading(shift: dict) -> str:
     )
 
 
-def render_historical_answer(
-    question: dict,
-    snapshot: dict,
-):
+def render_historical_answer(question: dict, snapshot: dict):
     key = question["question_key"]
     item = snapshot.get(key) or {}
 
@@ -406,99 +451,6 @@ def render_historical_answer(
     st.markdown(badge_text(value, colour))
 
 
-def render_question_table(
-    questions: list[dict],
-    saved_answers: dict,
-    previous_shifts: list[dict],
-    submissions: dict[str, dict],
-    planned: dict,
-    cil_planned: bool,
-) -> dict:
-    previous_shifts = sorted(
-        previous_shifts,
-        key=lambda shift: shift["start"],
-    )
-
-    while len(previous_shifts) < 3:
-        previous_shifts.insert(0, None)
-
-    headings = ["Question"]
-    for index, shift in enumerate(previous_shifts):
-        if shift is None:
-            headings.append(f"Previous shift {3 - index}")
-        else:
-            headings.append(format_shift_heading(shift))
-
-    headings.append(
-        format_shift_heading({
-            "start": st.session_state.get("_current_shift_start"),
-            "shift_name": st.session_state.get(
-                "_current_shift_name", "Current shift"
-            ),
-        })
-        if st.session_state.get("_current_shift_start")
-        else "Current shift"
-    )
-
-    widths = [2.0, 1.0, 1.0, 1.0, 1.35]
-    header_columns = st.columns(widths, gap="small")
-
-    for column, heading in zip(header_columns, headings):
-        with column:
-            st.markdown(f"**{heading}**")
-
-    st.divider()
-
-    values = {}
-    sections = list(dict.fromkeys(
-        question.get("section", "General")
-        for question in questions
-    ))
-
-    for section in sections:
-        st.markdown(f"### {section}")
-
-        for question in questions:
-            if question.get("section", "General") != section:
-                continue
-
-            key = question["question_key"]
-            columns = st.columns(widths, gap="small")
-
-            with columns[0]:
-                st.markdown(f"**{question['label']}**")
-
-            for index, past_shift in enumerate(previous_shifts):
-                with columns[index + 1]:
-                    if past_shift is None:
-                        st.caption("—")
-                        continue
-
-                    past_submission = submission_for(submissions, past_shift)
-                    past_answers = (
-                        (past_submission or {}).get("answers") or {}
-                    )
-                    render_historical_answer(question, past_answers)
-
-            with columns[4]:
-                old = saved_answers.get(key) or {}
-                old_value = old.get("value", "")
-
-                if question.get("input_type") == "auto":
-                    old_value = planned.get(key, 0)
-
-                value = render_question_input(
-                    question,
-                    old_value,
-                    planned,
-                    cil_planned,
-                    compact=True,
-                )
-                values[key] = value
-
-    return values
-
-
 # ---------------------------------------------------------------------
 # Management access
 # ---------------------------------------------------------------------
@@ -530,7 +482,6 @@ def require_management_password() -> bool:
         if hmac.compare_digest(password, expected):
             st.session_state.management_authenticated = True
             st.rerun()
-
         st.error("Incorrect password.")
 
     return False
@@ -550,7 +501,6 @@ def management_page(sb: Client, questions: list[dict]):
         if st.button("Lock management area", key="lock_if_down_management"):
             st.session_state.management_authenticated = False
             st.rerun()
-
         render_if_down_management(sb)
 
     with bulk_email_tab:
@@ -575,7 +525,6 @@ def management_page(sb: Client, questions: list[dict]):
                     placeholder="person1@example.com, person2@example.com",
                     help="Separate multiple addresses with commas, semicolons, or new lines.",
                 )
-
                 save_settings = st.form_submit_button(
                     "Save Bulk email settings",
                     type="primary",
@@ -584,9 +533,7 @@ def management_page(sb: Client, questions: list[dict]):
             if save_settings:
                 try:
                     saved_settings = save_bulk_email_settings(
-                        sb,
-                        to_email,
-                        cc_emails,
+                        sb, to_email, cc_emails
                     )
                     st.success("Bulk email settings saved.")
                     st.write(f"**To:** {saved_settings['to_email']}")
@@ -639,9 +586,7 @@ def management_page(sb: Client, questions: list[dict]):
                     if not label.strip():
                         st.error("Enter a name for the link.")
                     elif not valid_navigation_url(url.strip()):
-                        st.error(
-                            "Enter a URL starting with https:// or http://."
-                        )
+                        st.error("Enter a URL starting with https:// or http://.")
                     else:
                         sb.table("navigation_links").insert({
                             "label": label.strip(),
@@ -662,12 +607,10 @@ def management_page(sb: Client, questions: list[dict]):
                 ):
                     with st.form(f"edit_link_{link['id']}"):
                         edit_label = st.text_input(
-                            "Link name",
-                            value=link.get("label", ""),
+                            "Link name", value=link.get("label", "")
                         )
                         edit_url = st.text_input(
-                            "Website URL",
-                            value=link.get("url", ""),
+                            "Website URL", value=link.get("url", "")
                         )
                         edit_order = st.number_input(
                             "Display order",
@@ -686,9 +629,7 @@ def management_page(sb: Client, questions: list[dict]):
                         if not edit_label.strip():
                             st.error("Enter a name for the link.")
                         elif not valid_navigation_url(edit_url.strip()):
-                            st.error(
-                                "Enter a URL starting with https:// or http://."
-                            )
+                            st.error("Enter a URL starting with https:// or http://.")
                         else:
                             sb.table("navigation_links").update({
                                 "label": edit_label.strip(),
@@ -699,10 +640,7 @@ def management_page(sb: Client, questions: list[dict]):
                             st.success("Link updated.")
                             st.rerun()
 
-                    if st.button(
-                        "Delete link",
-                        key=f"delete_link_{link['id']}",
-                    ):
+                    if st.button("Delete link", key=f"delete_link_{link['id']}"):
                         sb.table("navigation_links").delete().eq(
                             "id", link["id"]
                         ).execute()
@@ -711,9 +649,7 @@ def management_page(sb: Client, questions: list[dict]):
 
         except Exception as exc:
             st.error(f"Could not manage sidebar links: {exc}")
-            st.info(
-                "Check that the navigation_links table exists in Supabase."
-            )
+            st.info("Check that the navigation_links table exists in Supabase.")
 
     with questions_tab:
         st.subheader("Manage shift questions")
@@ -773,7 +709,6 @@ def management_page(sb: Client, questions: list[dict]):
                     }
                     key = base
                     suffix = 2
-
                     while key in existing:
                         key = f"{base}_{suffix}"
                         suffix += 1
@@ -801,15 +736,12 @@ def management_page(sb: Client, questions: list[dict]):
                         },
                         "options": options,
                         "sort_order": max(
-                            [
-                                int(q.get("sort_order", 0))
-                                for q in questions
-                            ] + [0]
+                            [int(q.get("sort_order", 0)) for q in questions]
+                            + [0]
                         ) + 10,
                         "is_active": True,
                         "is_system": False,
                     }
-
                     sb.table("shift_questions").insert(row).execute()
                     st.success("Question added.")
                     st.rerun()
@@ -844,20 +776,15 @@ def management_page(sb: Client, questions: list[dict]):
             ):
                 with st.form(f"edit_{question['question_key']}"):
                     new_label = st.text_input(
-                        "Question text",
-                        value=question["label"],
+                        "Question text", value=question["label"]
                     )
-
                     old_section = question.get("section", "General")
                     section_index = (
                         sections.index(old_section)
-                        if old_section in sections
-                        else 4
+                        if old_section in sections else 4
                     )
                     new_section = st.selectbox(
-                        "Section",
-                        sections,
-                        index=section_index,
+                        "Section", sections, index=section_index
                     )
 
                     old_type = question.get("input_type", "text")
@@ -874,8 +801,7 @@ def management_page(sb: Client, questions: list[dict]):
                         "Colour rule",
                         rules_list,
                         index=rules_list.index(old_rule)
-                        if old_rule in rules_list
-                        else 0,
+                        if old_rule in rules_list else 0,
                     )
 
                     old_options = question.get("options") or []
@@ -883,7 +809,6 @@ def management_page(sb: Client, questions: list[dict]):
                         "Choice options (comma-separated)",
                         value=", ".join(old_options),
                     )
-
                     order = st.number_input(
                         "Display order",
                         min_value=0,
@@ -892,8 +817,7 @@ def management_page(sb: Client, questions: list[dict]):
                         step=10,
                     )
                     active = st.checkbox(
-                        "Active",
-                        value=bool(question.get("is_active", True)),
+                        "Active", value=bool(question.get("is_active", True))
                     )
                     save = st.form_submit_button("Save question settings")
 
@@ -910,9 +834,7 @@ def management_page(sb: Client, questions: list[dict]):
                         elif new_type == "yes_no":
                             options = ["Yes", "No"]
                         else:
-                            options = (
-                                old_options if new_type == "auto" else []
-                            )
+                            options = old_options if new_type == "auto" else []
 
                         rules = dict(old_rules)
                         rules["colour_rule"] = new_rule
@@ -926,7 +848,6 @@ def management_page(sb: Client, questions: list[dict]):
                             "sort_order": int(order),
                             "is_active": active,
                         }).eq("id", question["id"]).execute()
-
                         st.success("Question updated.")
                         st.rerun()
 
@@ -948,6 +869,8 @@ def render_question_input(
     kind = question.get("input_type", "text")
     rules = question.get("rules") or {}
     label_visibility = "collapsed" if compact else "visible"
+    shift_key = st.session_state.get("_active_shift_key", "unknown")
+    widget_key = f"input_{shift_key}_{key}"
 
     if kind == "auto":
         value = planned.get(key, 0)
@@ -955,7 +878,7 @@ def render_question_input(
             label,
             value=str(value),
             disabled=True,
-            key=f"auto_{key}_{value}",
+            key=f"auto_{shift_key}_{key}_{value}",
             label_visibility=label_visibility,
         )
         return value
@@ -965,14 +888,12 @@ def render_question_input(
             label,
             value="N/A — no CIL planned",
             disabled=True,
-            key=f"cil_na_{key}",
+            key=f"cil_na_{shift_key}_{key}",
             label_visibility=label_visibility,
         )
         return "N/A"
 
     if kind == "number":
-        minimum = int(rules.get("min", 0))
-        maximum = int(rules.get("max", 999999))
         value = (
             current_value
             if isinstance(current_value, (int, float))
@@ -980,36 +901,37 @@ def render_question_input(
         )
         return st.number_input(
             label,
-            min_value=minimum,
-            max_value=maximum,
+            min_value=int(rules.get("min", 0)),
+            max_value=int(rules.get("max", 999999)),
             value=value,
             step=1,
-            key=f"input_{key}",
+            key=widget_key,
             disabled=disabled,
-            help="Leave at the default if nothing was recorded.",
+            on_change=autosave_shift_answers,
+            help="Leave blank if nothing was recorded.",
             label_visibility=label_visibility,
         )
 
     if kind == "percentage":
-        value = (
-            current_value
-            if isinstance(current_value, (int, float))
-            else None
-        )
+        value = current_value if isinstance(current_value, (int, float)) else None
         return st.number_input(
             label,
             min_value=0,
             max_value=100,
             value=value,
             step=1,
-            key=f"input_{key}",
+            key=widget_key,
             disabled=disabled,
+            on_change=autosave_shift_answers,
             help="Enter 0–100%. 100% is green; below 100% is red.",
             label_visibility=label_visibility,
         )
 
-    if kind == "choice":
+    if kind in ("choice", "yes_no"):
         options = question.get("options") or ["L", "M", "H"]
+        if kind == "yes_no":
+            options = ["Yes", "No"]
+
         choices = ["— Select —"] + options
         existing = (
             str(current_value)
@@ -1020,25 +942,9 @@ def render_question_input(
             label,
             choices,
             index=choices.index(existing) if existing in choices else 0,
-            key=f"input_{key}",
+            key=widget_key,
             disabled=disabled,
-            label_visibility=label_visibility,
-        )
-        return "" if selected == "— Select —" else selected
-
-    if kind == "yes_no":
-        choices = ["— Select —", "Yes", "No"]
-        existing = (
-            str(current_value)
-            if current_value not in (None, "")
-            else "— Select —"
-        )
-        selected = st.selectbox(
-            label,
-            choices,
-            index=choices.index(existing) if existing in choices else 0,
-            key=f"input_{key}",
-            disabled=disabled,
+            on_change=autosave_shift_answers,
             label_visibility=label_visibility,
         )
         return "" if selected == "— Select —" else selected
@@ -1046,9 +952,10 @@ def render_question_input(
     return st.text_area(
         label,
         value=str(current_value or ""),
-        key=f"input_{key}",
+        key=widget_key,
         disabled=disabled,
-        height=80,
+        on_change=autosave_shift_answers,
+        height=56 if compact else 80,
         label_visibility=label_visibility,
     )
 
@@ -1082,9 +989,7 @@ def main():
         )
 
         links = load_navigation_links(sb)
-        active_links = [
-            link for link in links if link.get("is_active", True)
-        ]
+        active_links = [link for link in links if link.get("is_active", True)]
 
         if active_links:
             st.divider()
@@ -1098,10 +1003,7 @@ def main():
         st.divider()
         st.caption("Shift rotation is calculated automatically.")
 
-        if st.button(
-            "Refresh calendar and records",
-            use_container_width=True,
-        ):
+        if st.button("Refresh calendar and records", use_container_width=True):
             st.session_state.pop("selected_shift_key", None)
             st.rerun()
 
@@ -1130,7 +1032,6 @@ def main():
         now.date() - timedelta(days=35),
         now.date() + timedelta(days=35),
     )
-
     selected = next(
         (
             shift for shift in candidates
@@ -1149,24 +1050,19 @@ def main():
 
     with previous_button:
         if shift_index > 0 and st.button("← Previous shift"):
-            st.session_state.selected_shift_key = (
-                all_shifts[shift_index - 1]["key"]
-            )
+            st.session_state.selected_shift_key = all_shifts[shift_index - 1]["key"]
             st.rerun()
 
     with next_button:
         if shift_index + 1 < len(all_shifts) and st.button("Next shift →"):
-            st.session_state.selected_shift_key = (
-                all_shifts[shift_index + 1]["key"]
-            )
+            st.session_state.selected_shift_key = all_shifts[shift_index + 1]["key"]
             st.rerun()
 
     team_hex = COLOUR_HEX.get(selected["team_colour"], "#666666")
-
     st.markdown(
-        f"<div style='padding:12px 16px;border-radius:10px;"
-        f"background:{team_hex}18;border-left:6px solid {team_hex};"
-        f"margin-bottom:14px'>"
+        f"<div style='padding:8px 12px;border-radius:8px;"
+        f"background:{team_hex}18;border-left:5px solid {team_hex};"
+        f"margin-bottom:8px'>"
         f"<b>{selected['label']}</b><br>"
         f"{selected['start'].strftime('%a %d %b %Y, %H:%M')} – "
         f"{selected['end'].strftime('%a %d %b %Y, %H:%M')} (UK time)"
@@ -1186,150 +1082,125 @@ def main():
         if shift["end"] <= selected["start"]
     ][-3:]
 
-    left, right = st.columns([1.2, 1.0], gap="large")
+    # Context used by the autosave callback.
+    st.session_state["_active_shift_key"] = selected["key"]
+    st.session_state["_autosave_selected_shift"] = selected
+    st.session_state["_autosave_questions"] = active_questions
+    st.session_state["_autosave_planned"] = planned
+    st.session_state["_autosave_cil_planned"] = cil_planned
+
+    row_id_key = f"_autosave_row_id_{selected['key']}"
+    if (saved or {}).get("id"):
+        st.session_state[row_id_key] = saved["id"]
+
+    left, right = st.columns([1.2, 1.0], gap="medium")
 
     with left:
         st.subheader("Shift questions and answers")
         st.caption(
-            "Compare the previous three shifts with the current shift. "
+            "Answers save automatically when you change a field. "
             "Previous answers are read-only."
         )
 
-        with st.form(f"shift_form_{selected['key']}"):
-            submitter = st.text_input(
-                "Recorded by (optional)",
-                value=(saved or {}).get("submitted_by") or "",
+        submitter_key = f"submitter_{selected['key']}"
+        if submitter_key not in st.session_state:
+            st.session_state[submitter_key] = (
+                (saved or {}).get("submitted_by") or ""
             )
 
-            st.session_state["_current_shift_start"] = selected["start"]
-            st.session_state["_current_shift_name"] = selected["shift_name"]
+        st.text_input(
+            "Recorded by (optional)",
+            key=submitter_key,
+            on_change=autosave_shift_answers,
+        )
 
-            historical = sorted(
-                previous_shifts,
-                key=lambda shift: shift["start"],
+        historical = sorted(previous_shifts, key=lambda shift: shift["start"])
+        while len(historical) < 3:
+            historical.insert(0, None)
+
+        headings = ["Question"]
+        for index, past_shift in enumerate(historical):
+            headings.append(
+                format_shift_heading(past_shift)
+                if past_shift else f"Previous shift {3 - index}"
             )
-            while len(historical) < 3:
-                historical.insert(0, None)
+        headings.append(format_shift_heading(selected))
 
-            headings = ["Question"]
-            for index, past_shift in enumerate(historical):
-                headings.append(
-                    format_shift_heading(past_shift)
-                    if past_shift
-                    else f"Previous shift {3 - index}"
-                )
-            headings.append(format_shift_heading(selected))
+        widths = [1.7, 0.9, 0.9, 0.9, 1.15]
+        header_columns = st.columns(widths, gap="small")
+        for column, heading in zip(header_columns, headings):
+            with column:
+                st.markdown(f"**{heading}**")
 
-            widths = [2.0, 1.0, 1.0, 1.0, 1.35]
-            header_columns = st.columns(widths, gap="small")
-            for column, heading in zip(header_columns, headings):
-                with column:
-                    st.markdown(f"**{heading}**")
+        st.divider()
 
-            st.divider()
+        sections = list(dict.fromkeys(
+            question.get("section", "General")
+            for question in active_questions
+        ))
 
-            values = {}
-            sections = list(dict.fromkeys(
-                question.get("section", "General")
-                for question in active_questions
-            ))
+        for section in sections:
+            st.markdown(f"### {section}")
 
-            for section in sections:
-                st.markdown(f"### {section}")
+            for question in active_questions:
+                if question.get("section", "General") != section:
+                    continue
 
-                for question in active_questions:
-                    if question.get("section", "General") != section:
-                        continue
+                key = question["question_key"]
+                columns = st.columns(widths, gap="small")
 
-                    key = question["question_key"]
-                    columns = st.columns(widths, gap="small")
+                with columns[0]:
+                    st.markdown(f"**{question['label']}**")
 
-                    with columns[0]:
-                        st.markdown(f"**{question['label']}**")
+                for index, past_shift in enumerate(historical):
+                    with columns[index + 1]:
+                        if past_shift is None:
+                            st.caption("—")
+                            continue
 
-                    for index, past_shift in enumerate(historical):
-                        with columns[index + 1]:
-                            if past_shift is None:
-                                st.caption("—")
-                                continue
-
-                            past_submission = submission_for(
-                                submissions, past_shift
-                            )
-                            past_answers = (
-                                (past_submission or {}).get("answers") or {}
-                            )
-                            render_historical_answer(
-                                question, past_answers
-                            )
-
-                    with columns[4]:
-                        old = saved_answers.get(key) or {}
-                        old_value = old.get("value", "")
-
-                        if question.get("input_type") == "auto":
-                            old_value = planned.get(key, 0)
-
-                        value = render_question_input(
-                            question,
-                            old_value,
-                            planned,
-                            cil_planned,
-                            compact=True,
+                        past_submission = submission_for(submissions, past_shift)
+                        past_answers = (
+                            (past_submission or {}).get("answers") or {}
                         )
-                        values[key] = value
+                        render_historical_answer(question, past_answers)
 
-            submitted = st.form_submit_button(
-                "Save shift record",
-                type="primary",
-                use_container_width=True,
-            )
+                with columns[4]:
+                    old = saved_answers.get(key) or {}
+                    old_value = old.get("value", "")
 
-        if submitted:
-            missing = [
-                question["label"]
-                for question in active_questions
-                if (question.get("rules") or {}).get("required")
-                and values.get(question["question_key"]) in (None, "")
-            ]
+                    if question.get("input_type") == "auto":
+                        old_value = planned.get(key, 0)
 
-            if missing:
-                st.error(
-                    "Please complete required questions: "
-                    + ", ".join(missing)
-                )
-            else:
-                snapshot = snapshot_answers(
-                    active_questions,
-                    values,
-                    planned,
-                    cil_planned,
-                )
+                    widget_key = f"input_{selected['key']}_{key}"
 
-                row = {
-                    "shift_date": selected["shift_date"],
-                    "shift_name": selected["shift_name"],
-                    "shift_start": selected["start"].isoformat(),
-                    "shift_end": selected["end"].isoformat(),
-                    "team_colour": selected["team_colour"],
-                    "answers": snapshot,
-                    "submitted_by": submitter.strip() or None,
-                    "updated_at": datetime.now(UK).isoformat(),
-                }
+                    # Initialise each shift's widget only once from Supabase.
+                    # Do not overwrite widget state on every Streamlit rerun.
+                    if widget_key not in st.session_state:
+                        kind = question.get("input_type", "text")
+                        if kind in ("choice", "yes_no") and old_value in (None, ""):
+                            st.session_state[widget_key] = "— Select —"
+                        elif kind in ("number", "percentage") and not isinstance(
+                            old_value, (int, float)
+                        ):
+                            st.session_state[widget_key] = None
+                        else:
+                            st.session_state[widget_key] = old_value
 
-                try:
-                    if saved and saved.get("id"):
-                        sb.table("shift_submissions").update(
-                            row
-                        ).eq("id", saved["id"]).execute()
-                    else:
-                        sb.table("shift_submissions").insert(row).execute()
+                    render_question_input(
+                        question,
+                        old_value,
+                        planned,
+                        cil_planned,
+                        compact=True,
+                    )
 
-                    st.success("Shift record saved.")
-                    st.rerun()
+        last_saved = st.session_state.get("_autosave_last_saved")
+        last_error = st.session_state.get("_autosave_last_error", "")
 
-                except Exception as exc:
-                    st.error(f"Could not save shift record: {exc}")
+        if last_error:
+            st.error(f"Automatic save failed: {last_error}")
+        elif last_saved:
+            st.caption(f"Last automatically saved at {last_saved} (UK time).")
 
     # -----------------------------------------------------------------
     # Transport list, If Down list and totals — RIGHT
@@ -1353,10 +1224,7 @@ def main():
 
             title_text = str(event.get("title") or "")
             search_text = (
-                source
-                + " "
-                + title_text
-                + " "
+                source + " " + title_text + " "
                 + str(event.get("load_header") or "")
             ).casefold()
 
@@ -1370,7 +1238,6 @@ def main():
                 source = "Manual"
 
             colour = event.get("colour")
-
             if not colour:
                 colour = {
                     "Campey": COLOUR_HEX["Blue"],
@@ -1394,9 +1261,7 @@ def main():
                 "borderColor": colour,
             })
 
-        overnight_shift = (
-            selected["end"].date() != selected["start"].date()
-        )
+        overnight_shift = selected["end"].date() != selected["start"].date()
         calendar_days = 2 if overnight_shift else 1
 
         calendar_options = {
@@ -1413,19 +1278,18 @@ def main():
                 "center": "title",
                 "right": "",
             },
-            "height": 560,
+            "height": 420,
             "nowIndicator": True,
             "timeZone": "local",
             "firstDay": 1,
         }
 
         st.caption(
-            "All bookings are displayed in one chronological column. "
+            "Bookings are displayed in one chronological column. "
             "Night shifts continue across midnight."
         )
 
         calendar_rendered = False
-
         try:
             calendar(
                 events=calendar_events,
@@ -1443,10 +1307,7 @@ def main():
             if not shift_events:
                 st.caption("No calendar bookings overlap this shift.")
 
-            for event in sorted(
-                shift_events,
-                key=lambda item: item["_start"],
-            ):
+            for event in sorted(shift_events, key=lambda item: item["_start"]):
                 title_text = str(event.get("title") or "Booking")
                 source = str(
                     event.get("source")
@@ -1454,7 +1315,6 @@ def main():
                     or event.get("category")
                     or "Transport"
                 ).strip()
-
                 search_text = f"{source} {title_text}".casefold()
 
                 if "campey" in search_text:
@@ -1472,10 +1332,7 @@ def main():
                     f"{event['_end'].strftime('%a %H:%M')}"
                 )
 
-        # -------------------------------------------------------------
-        # Bulk delivery email controls
-        # -------------------------------------------------------------
-
+        # Bulk delivery email controls.
         st.markdown("### Bulk delivery emails")
 
         bulk_events = []
@@ -1484,7 +1341,6 @@ def main():
                 str(event.get(field) or "")
                 for field in ("source", "load_header", "category", "title")
             ).casefold()
-
             if "bulk" in source_text:
                 bulk_events.append(event)
 
@@ -1498,11 +1354,9 @@ def main():
                 event_id = str(event.get("id") or "").strip()
                 title_text = str(event.get("title") or "Bulk delivery")
                 event_start = event.get("_start")
-
                 time_label = (
                     event_start.astimezone(UK).strftime("%a %d %b %Y, %H:%M")
-                    if event_start
-                    else "Time not available"
+                    if event_start else "Time not available"
                 )
 
                 with st.container(border=True):
@@ -1523,9 +1377,7 @@ def main():
                     ):
                         with st.spinner("Sending Bulk delivery email..."):
                             success, message = send_bulk_delivery_email(
-                                sb,
-                                event,
-                                event_id,
+                                sb, event, event_id
                             )
 
                         if success:
@@ -1535,7 +1387,6 @@ def main():
                         else:
                             st.error(message)
 
-        # The implementation now lives in if_down.py.
         render_if_down_list(sb, selected)
 
         st.markdown("**Planned transport totals**")
